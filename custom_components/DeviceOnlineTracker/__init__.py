@@ -40,6 +40,63 @@ PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
 async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
     """Set up the Device Online Tracker component."""
     hass.data.setdefault(DOMAIN, {})
+    
+    async def async_ping_all_devices(call):
+        """Handle the service call to ping all devices."""
+        _LOGGER.debug("Service call received: %s", call.service)
+        
+        # 触发所有协调器的刷新
+        for entry_id, coordinator in hass.data[DOMAIN].items():
+            await coordinator.async_refresh()
+        
+        _LOGGER.info("已触发所有设备的在线状态检查")
+    
+    async def async_ping_single_device(call):
+        """Handle the service call to ping a single device."""
+        _LOGGER.debug("Service call received: %s with data %s", call.service, call.data)
+        
+        # 检查是否提供了设备名称或entry_id
+        device_name = call.data.get("device_name")
+        entry_id = call.data.get("entry_id")
+        
+        if not device_name and not entry_id:
+            _LOGGER.error("服务调用缺少参数：需要提供 device_name 或 entry_id")
+            return
+        
+        # 查找目标协调器
+        target_coordinators = []
+        
+        for current_entry_id, coordinator in hass.data[DOMAIN].items():
+            if entry_id and entry_id == current_entry_id:
+                target_coordinators.append(coordinator)
+                break
+            elif device_name:
+                # 从协调器的名称中提取设备名称
+                if device_name.lower() in coordinator.name.lower():
+                    target_coordinators.append(coordinator)
+        
+        if not target_coordinators:
+            _LOGGER.warning("未找到匹配的设备：device_name='%s', entry_id='%s'", device_name, entry_id)
+            return
+        
+        # 触发目标协调器的刷新
+        for coordinator in target_coordinators:
+            await coordinator.async_refresh()
+            _LOGGER.info("已触发设备 %s 的在线状态检查", coordinator.name)
+    
+    # 注册服务
+    hass.services.async_register(
+        DOMAIN,
+        "ping_all",
+        async_ping_all_devices
+    )
+    
+    hass.services.async_register(
+        DOMAIN,
+        "ping_device",
+        async_ping_single_device
+    )
+    
     return True
 
 def get_default_interface() -> str:
@@ -300,4 +357,4 @@ class DeviceOnlineTrackerEntity(CoordinatorEntity):
             manufacturer="捣鼓程序员",
             model="Device Online Tracker",
             sw_version="1.0",
-        ) 
+        )
