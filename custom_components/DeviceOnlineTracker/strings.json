@@ -6,7 +6,11 @@
                 "description": "请输入要监控的设备信息",
                 "data": {
                     "name": "设备名称",
-                    "host": "IP/域名/MAC"
+                    "host": "IP/域名/MAC",
+                    "scan_interval": "扫描间隔（秒）",
+                    "offline_threshold": "离线判定阈值（连续失败次数）",
+                    "ping_count": "单次检测Ping包数量",
+                    "retry_ping_count": "重试时Ping包数量"
                 }
             }
         },
@@ -15,6 +19,21 @@
         },
         "abort": {
             "already_configured": "该设备已经配置"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "配置选项",
+                "description": "调整设备检测参数",
+                "data": {
+                    "enabled": "启用检测",
+                    "scan_interval": "扫描间隔（秒）",
+                    "offline_threshold": "离线判定阈值（连续失败次数）",
+                    "ping_count": "单次检测Ping包数量",
+                    "retry_ping_count": "重试时Ping包数量"
+                }
+            }
         }
     }
 } 

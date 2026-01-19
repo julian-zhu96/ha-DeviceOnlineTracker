@@ -2,11 +2,22 @@
 import logging
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.const import CONF_NAME, CONF_HOST
+from homeassistant.const import CONF_NAME, CONF_HOST, CONF_SCAN_INTERVAL
 from homeassistant.core import callback
 import homeassistant.helpers.config_validation as cv
 
-from . import DOMAIN
+from . import (
+    DOMAIN,
+    CONF_OFFLINE_THRESHOLD,
+    CONF_PING_COUNT,
+    CONF_RETRY_PING_COUNT,
+    CONF_ENABLED,
+    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_OFFLINE_THRESHOLD,
+    DEFAULT_PING_COUNT,
+    DEFAULT_RETRY_PING_COUNT,
+    DEFAULT_ENABLED,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +50,18 @@ class DeviceOnlineTrackerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required(CONF_NAME): str,
                 vol.Required(CONF_HOST): str,
+                vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): vol.All(
+                    vol.Coerce(int), vol.Range(min=10, max=3600)
+                ),
+                vol.Optional(CONF_OFFLINE_THRESHOLD, default=DEFAULT_OFFLINE_THRESHOLD): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=10)
+                ),
+                vol.Optional(CONF_PING_COUNT, default=DEFAULT_PING_COUNT): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=10)
+                ),
+                vol.Optional(CONF_RETRY_PING_COUNT, default=DEFAULT_RETRY_PING_COUNT): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=10)
+                ),
             }),
             errors=errors,
         )
@@ -61,7 +84,43 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
+        # 获取当前值
+        current_scan_interval = self.config_entry.options.get(
+            CONF_SCAN_INTERVAL,
+            self.config_entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+        )
+        current_offline_threshold = self.config_entry.options.get(
+            CONF_OFFLINE_THRESHOLD,
+            self.config_entry.data.get(CONF_OFFLINE_THRESHOLD, DEFAULT_OFFLINE_THRESHOLD)
+        )
+        current_ping_count = self.config_entry.options.get(
+            CONF_PING_COUNT,
+            self.config_entry.data.get(CONF_PING_COUNT, DEFAULT_PING_COUNT)
+        )
+        current_retry_ping_count = self.config_entry.options.get(
+            CONF_RETRY_PING_COUNT,
+            self.config_entry.data.get(CONF_RETRY_PING_COUNT, DEFAULT_RETRY_PING_COUNT)
+        )
+        current_enabled = self.config_entry.options.get(
+            CONF_ENABLED,
+            self.config_entry.data.get(CONF_ENABLED, DEFAULT_ENABLED)
+        )
+
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema({})
+            data_schema=vol.Schema({
+                vol.Optional(CONF_ENABLED, default=current_enabled): bool,
+                vol.Optional(CONF_SCAN_INTERVAL, default=current_scan_interval): vol.All(
+                    vol.Coerce(int), vol.Range(min=10, max=3600)
+                ),
+                vol.Optional(CONF_OFFLINE_THRESHOLD, default=current_offline_threshold): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=10)
+                ),
+                vol.Optional(CONF_PING_COUNT, default=current_ping_count): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=10)
+                ),
+                vol.Optional(CONF_RETRY_PING_COUNT, default=current_retry_ping_count): vol.All(
+                    vol.Coerce(int), vol.Range(min=1, max=10)
+                ),
+            })
         ) 
