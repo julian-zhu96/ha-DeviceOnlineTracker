@@ -51,7 +51,7 @@ DEFAULT_SCAN_INTERVAL = 60  # 秒
 DEFAULT_OFFLINE_THRESHOLD = 3  # 连续失败次数（跨周期）
 DEFAULT_PING_COUNT = 3  # 单次检测发送的ping包数量
 DEFAULT_RETRY_INTERVAL = 5  # 快速重试间隔（秒）
-DEFAULT_RETRY_PING_COUNT = 1  # 重试时发送的ping包数量（更快）
+DEFAULT_RETRY_PING_COUNT = 3  # 重试时发送的ping包数量
 DEFAULT_ENABLED = True  # 默认启用检测
 
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
@@ -94,7 +94,8 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
                         ping_count=ping_count,
                         retry_interval=retry_interval,
                         retry_ping_count=retry_ping_count,
-                        mode=mode
+                        mode=mode,
+                        reset_fail_count=True  # API调用时重置失败计数，立即判断状态
                     )
                     coordinator.async_set_updated_data(device_data)
                 else:
@@ -159,7 +160,8 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
                     ping_count=ping_count,
                     retry_interval=retry_interval,
                     retry_ping_count=retry_ping_count,
-                    mode=mode
+                    mode=mode,
+                    reset_fail_count=True  # API调用时重置失败计数，立即判断状态
                 )
                 coordinator.async_set_updated_data(device_data)
             else:
@@ -173,7 +175,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         "ping_all",
         async_ping_all_devices,
         schema=vol.Schema({
-            vol.Optional("mode", default=MODE_PARALLEL): vol.In([MODE_PARALLEL, MODE_RETRY])
+            vol.Optional("mode", default=MODE_RETRY): vol.In([MODE_PARALLEL, MODE_RETRY])
         })
     )
     
@@ -184,7 +186,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         schema=vol.Schema({
             vol.Optional("device_name"): str,
             vol.Optional("entry_id"): str,
-            vol.Optional("mode", default=MODE_PARALLEL): vol.In([MODE_PARALLEL, MODE_RETRY])
+            vol.Optional("mode", default=MODE_RETRY): vol.In([MODE_PARALLEL, MODE_RETRY])
         })
     )
     
@@ -314,7 +316,8 @@ async def update_device_data(
     ping_count: int = DEFAULT_PING_COUNT,
     retry_interval: float = DEFAULT_RETRY_INTERVAL,
     retry_ping_count: int = DEFAULT_RETRY_PING_COUNT,
-    mode: str = MODE_PARALLEL
+    mode: str = MODE_PARALLEL,
+    reset_fail_count: bool = False  # 是否重置失败计数，用于API调用时立即判断状态
 ) -> Dict[str, Any]:
     """更新设备数据（带防抖机制）
     
@@ -332,6 +335,7 @@ async def update_device_data(
         retry_interval: 快速重试模式下的重试间隔（秒）
         retry_ping_count: 重试时发送的ping包数量
         mode: 检测模式，"parallel" 或 "retry"
+        reset_fail_count: 是否重置失败计数，用于API调用时立即判断状态
         
     Returns:
         Dict[str, Any]: 更新后的设备数据
@@ -341,50 +345,118 @@ async def update_device_data(
         current_date = current_time.date()
         was_online = device_data.get("is_online", False)
         
+        # name-host 显示名称
+        display_name = f"{device_data['name']}-{host}"  
         # 初始化失败计数器
         if "fail_count" not in device_data:
             device_data["fail_count"] = 0
+        
+        # 保存原始失败计数，用于API调用后恢复
+        original_fail_count = device_data["fail_count"]
+        
+        # API调用时使用临时失败计数，不影响定时任务的累积计数
+        temp_fail_count = 0
         
         # 防抖逻辑
         if is_online:
             # 设备在线，重置失败计数
             device_data["fail_count"] = 0
             final_online_status = True
-            _LOGGER.debug("设备 %s 检测在线，重置失败计数", host)
+            _LOGGER.debug("设备 %s 检测在线，重置失败计数",  display_name)
         else:
             # 设备检测离线
-            device_data["fail_count"] += 1
-            _LOGGER.debug("设备 %s 检测离线，失败计数: %d/%d, 模式: %s", 
-                         host, device_data["fail_count"], offline_threshold, mode)
+            if reset_fail_count:
+                # API调用时使用临时计数，不影响原始计数
+                temp_fail_count = 1
+                _LOGGER.debug("设备 %s 检测离线（API调用），临时失败计数: %d/%d, 模式: %s", 
+                             display_name, temp_fail_count, offline_threshold, mode) 
+            else:
+                # 定时任务时累积原始计数
+                device_data["fail_count"] += 1
+                _LOGGER.debug("设备 %s 检测离线，失败计数: %d/%d, 模式: %s", 
+                             display_name, device_data["fail_count"], offline_threshold, mode) 
             
             # 快速重试模式：检测到离线时立即连续重试
-            if mode == MODE_RETRY and was_online and device_data["fail_count"] < offline_threshold:
-                _LOGGER.info("设备 %s 从在线变为离线，开始快速重试确认 (%d/%d)", 
-                            host, device_data["fail_count"], offline_threshold)
-                
-                for retry in range(offline_threshold - device_data["fail_count"]):
-                    await asyncio.sleep(retry_interval)
-                    retry_online, _ = await check_device_status(host, retry_ping_count)
+            if mode == MODE_RETRY and (was_online or reset_fail_count):
+                # 计算当前使用的失败计数
+                current_fail_count = temp_fail_count if reset_fail_count else device_data["fail_count"]
+                if current_fail_count < offline_threshold:
+                    _LOGGER.info("设备 %s 从在线变为离线，开始快速重试确认 (%d/%d)", 
+                                display_name, current_fail_count, offline_threshold)
                     
-                    if retry_online:
-                        device_data["fail_count"] = 0
-                        _LOGGER.info("设备 %s 快速重试第 %d 次成功，确认在线", host, retry + 1)
-                        break
+                    retry_success = False
+                    for retry in range(offline_threshold - current_fail_count):
+                        await asyncio.sleep(retry_interval)
+                        retry_online, _ = await check_device_status(host, retry_ping_count)
+                        
+                        if retry_online:
+                            if reset_fail_count:
+                                # API调用时，重试成功则保持在线状态
+                                final_online_status = True
+                                _LOGGER.info("设备 %s 快速重试第 %d 次成功，确认在线", display_name, retry + 1)
+                            else:
+                                # 定时任务时，重试成功则重置原始计数
+                                device_data["fail_count"] = 0
+                                final_online_status = True
+                                _LOGGER.info("设备 %s 快速重试第 %d 次成功，确认在线", display_name, retry + 1)
+                            retry_success = True
+                            break
+                        else:
+                            if reset_fail_count:
+                                # API调用时，使用临时计数
+                                temp_fail_count += 1
+                                _LOGGER.debug("设备 %s 快速重试第 %d 次失败，临时失败计数: %d/%d", 
+                                             display_name, retry + 1, temp_fail_count, offline_threshold)
+                            else:
+                                # 定时任务时，累积原始计数
+                                device_data["fail_count"] += 1
+                                _LOGGER.debug("设备 %s 快速重试第 %d 次失败，失败计数: %d/%d", 
+                                             display_name, retry + 1, device_data["fail_count"], offline_threshold)
+                    
+                    if retry_success:
+                        # 重试成功，已经设置了final_online_status，直接进入下一阶段
+                        pass
                     else:
-                        device_data["fail_count"] += 1
-                        _LOGGER.debug("设备 %s 快速重试第 %d 次失败，失败计数: %d/%d", 
-                                     host, retry + 1, device_data["fail_count"], offline_threshold)
-            
-            # 判断最终状态
-            if device_data["fail_count"] >= offline_threshold:
-                final_online_status = False
-                _LOGGER.info("设备 %s 连续 %d 次检测失败，确认离线", 
-                            host, device_data["fail_count"])
+                        # 重试失败，判断最终状态
+                        if reset_fail_count:
+                            # API调用时，使用临时计数判断
+                            if temp_fail_count >= offline_threshold:
+                                final_online_status = False
+                                _LOGGER.info("设备 %s API调用连续 %d 次检测失败，确认离线", 
+                                            display_name, temp_fail_count)
+                            else:
+                                # API调用时，如果重试失败次数未达阈值，立即返回离线
+                                final_online_status = False
+                                _LOGGER.debug("设备 %s API调用重试失败次数未达阈值，但立即返回离线状态", 
+                                             display_name)
+                        else:
+                            # 定时任务时，使用原始计数判断
+                            if device_data["fail_count"] >= offline_threshold:
+                                final_online_status = False
+                                _LOGGER.info("设备 %s 连续 %d 次检测失败，确认离线", 
+                                            display_name, device_data["fail_count"])
+                            else:
+                                # 还没达到阈值，保持之前的在线状态
+                                final_online_status = was_online
+                                _LOGGER.debug("设备 %s 失败次数未达阈值，保持状态: %s", 
+                                             display_name, "在线" if final_online_status else "离线")
             else:
-                # 还没达到阈值，保持之前的在线状态
-                final_online_status = was_online
-                _LOGGER.debug("设备 %s 失败次数未达阈值，保持状态: %s", 
-                             host, "在线" if final_online_status else "离线")
+                # 非快速重试模式，直接判断状态
+                if reset_fail_count:
+                    # API调用时，只要检测失败，立即返回离线
+                    final_online_status = False
+                    _LOGGER.debug("设备 %s API调用检测离线，立即返回离线状态", display_name)
+                else:
+                    # 定时任务时，使用原始计数判断
+                    if device_data["fail_count"] >= offline_threshold:
+                        final_online_status = False
+                        _LOGGER.info("设备 %s 连续 %d 次检测失败，确认离线", 
+                                    display_name, device_data["fail_count"])
+                    else:
+                        # 还没达到阈值，保持之前的在线状态
+                        final_online_status = was_online
+                        _LOGGER.debug("设备 %s 失败次数未达阈值，保持状态: %s", 
+                                     display_name, "在线" if final_online_status else "离线")
         
         # 如果是新的一天，重置计时
         if current_date != device_data["last_date"]:
@@ -464,6 +536,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     # 初始化设备数据
     device_data = {
+        "name": device_name,
         "online_time": 0,
         "last_check": None,
         "last_date": datetime.now().date().isoformat(),
@@ -530,7 +603,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ping_count=ping_count,
             retry_interval=retry_interval,
             retry_ping_count=retry_ping_count,
-            mode=MODE_PARALLEL  # 定时扫描默认使用并行模式
+            mode=MODE_RETRY  # 定时扫描默认使用快速重试模式，提高检测可靠性
         )
 
     coordinator = DataUpdateCoordinator(
