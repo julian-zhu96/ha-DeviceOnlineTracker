@@ -28,6 +28,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.helpers.storage import Store
 import voluptuous as vol
+import homeassistant.helpers.config_validation as cv
 
 from icmplib import async_ping
 
@@ -41,6 +42,7 @@ CONF_PING_COUNT = "ping_count"
 CONF_RETRY_INTERVAL = "retry_interval"
 CONF_RETRY_PING_COUNT = "retry_ping_count"
 CONF_ENABLED = "enabled"
+CONF_MAX_CONCURRENT = "max_concurrent"  # 最大并发数
 
 # 检测模式
 MODE_PARALLEL = "parallel"  # 并行ping（默认，快速）
@@ -53,55 +55,96 @@ DEFAULT_PING_COUNT = 3  # 单次检测发送的ping包数量
 DEFAULT_RETRY_INTERVAL = 5  # 快速重试间隔（秒）
 DEFAULT_RETRY_PING_COUNT = 3  # 重试时发送的ping包数量
 DEFAULT_ENABLED = True  # 默认启用检测
+DEFAULT_MAX_CONCURRENT = 5  # 默认最大并发数
 
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
+
+# configuration.yaml 配置 schema
+CONFIG_SCHEMA = vol.Schema(
+    {
+        DOMAIN: vol.Schema({
+            vol.Optional(CONF_MAX_CONCURRENT, default=DEFAULT_MAX_CONCURRENT): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=50)
+            ),
+        })
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
     """Set up the Device Online Tracker component."""
     hass.data.setdefault(DOMAIN, {})
     hass.data[f"{DOMAIN}_config"] = {}  # 存储每个设备的配置
     
+    # 从 configuration.yaml 读取全局配置
+    global_config = config.get(DOMAIN, {})
+    max_concurrent = global_config.get(CONF_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT)
+    hass.data[f"{DOMAIN}_global"] = {
+        CONF_MAX_CONCURRENT: max_concurrent,
+    }
+    _LOGGER.info("全局配置: max_concurrent=%d", max_concurrent)
+    
     async def async_ping_all_devices(call):
-        """Handle the service call to ping all devices."""
+        """Handle the service call to ping all devices (concurrent)."""
         _LOGGER.debug("Service call received: %s", call.service)
         
         mode = call.data.get("mode", MODE_PARALLEL)
-        _LOGGER.info("触发所有设备检测，模式: %s", mode)
+        # 允许通过服务调用覆盖并发数
+        concurrent_limit = call.data.get("max_concurrent", hass.data[f"{DOMAIN}_global"].get(CONF_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT))
+        _LOGGER.info("触发所有设备检测，模式: %s，最大并发: %d", mode, concurrent_limit)
         
-        # 触发所有协调器的刷新
+        # 收集所有需要检测的设备任务
+        async def ping_device_task(entry_id: str, coordinator: DataUpdateCoordinator) -> None:
+            """单个设备的检测任务"""
+            device_config = hass.data[f"{DOMAIN}_config"].get(entry_id, {})
+            
+            # 检查设备是否启用
+            if not device_config.get("enabled", DEFAULT_ENABLED):
+                _LOGGER.debug("设备 %s 已禁用，跳过检测", coordinator.name)
+                return
+            
+            host = device_config.get("host")
+            device_data = device_config.get("device_data")
+            store = device_config.get("store")
+            offline_threshold = device_config.get("offline_threshold", DEFAULT_OFFLINE_THRESHOLD)
+            ping_count = device_config.get("ping_count", DEFAULT_PING_COUNT)
+            retry_interval = device_config.get("retry_interval", DEFAULT_RETRY_INTERVAL)
+            retry_ping_count = device_config.get("retry_ping_count", DEFAULT_RETRY_PING_COUNT)
+            
+            if host and device_data is not None and store:
+                await update_device_data(
+                    device_data, host, store, entry_id,
+                    offline_threshold=offline_threshold,
+                    ping_count=ping_count,
+                    retry_interval=retry_interval,
+                    retry_ping_count=retry_ping_count,
+                    mode=mode,
+                    reset_fail_count=True  # API调用时重置失败计数，立即判断状态
+                )
+                coordinator.async_set_updated_data(device_data)
+            else:
+                await coordinator.async_refresh()
+        
+        # 收集所有设备
+        devices_to_ping = []
         for entry_id, coordinator in hass.data[DOMAIN].items():
             if isinstance(coordinator, DataUpdateCoordinator):
-                # 获取设备配置
-                device_config = hass.data[f"{DOMAIN}_config"].get(entry_id, {})
-                
-                # 检查设备是否启用
-                if not device_config.get("enabled", DEFAULT_ENABLED):
-                    _LOGGER.debug("设备 %s 已禁用，跳过检测", coordinator.name)
-                    continue
-                
-                host = device_config.get("host")
-                device_data = device_config.get("device_data")
-                store = device_config.get("store")
-                offline_threshold = device_config.get("offline_threshold", DEFAULT_OFFLINE_THRESHOLD)
-                ping_count = device_config.get("ping_count", DEFAULT_PING_COUNT)
-                retry_interval = device_config.get("retry_interval", DEFAULT_RETRY_INTERVAL)
-                retry_ping_count = device_config.get("retry_ping_count", DEFAULT_RETRY_PING_COUNT)
-                
-                if host and device_data is not None and store:
-                    await update_device_data(
-                        device_data, host, store, entry_id,
-                        offline_threshold=offline_threshold,
-                        ping_count=ping_count,
-                        retry_interval=retry_interval,
-                        retry_ping_count=retry_ping_count,
-                        mode=mode,
-                        reset_fail_count=True  # API调用时重置失败计数，立即判断状态
-                    )
-                    coordinator.async_set_updated_data(device_data)
-                else:
-                    await coordinator.async_refresh()
+                devices_to_ping.append((entry_id, coordinator))
         
-        _LOGGER.info("已完成所有设备的在线状态检查")
+        # 使用信号量限制并发数
+        semaphore = asyncio.Semaphore(concurrent_limit)
+        
+        async def limited_ping_task(entry_id: str, coordinator: DataUpdateCoordinator) -> None:
+            """带并发限制的检测任务"""
+            async with semaphore:
+                await ping_device_task(entry_id, coordinator)
+        
+        # 并发执行所有设备检测
+        if devices_to_ping:
+            tasks = [limited_ping_task(entry_id, coord) for entry_id, coord in devices_to_ping]
+            await asyncio.gather(*tasks, return_exceptions=True)
+        
+        _LOGGER.info("已完成所有设备的在线状态检查（并发模式，%d 个设备）", len(devices_to_ping))
     
     async def async_ping_single_device(call):
         """Handle the service call to ping a single device."""
