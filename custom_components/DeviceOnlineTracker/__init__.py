@@ -425,6 +425,13 @@ async def check_arp_table(ip_address: str) -> bool:
         _LOGGER.error("检查 ARP 表时出错: %s", err)
         return False
 
+# 接口缓存和命令状态记录
+ARPING_CACHE = {
+    'working_interfaces': [],  # 记录成功过的网络接口
+    'base_cmd_working': True,  # 基础命令是否工作
+    'last_check': 0  # 上次检查时间戳
+}
+
 async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
     """使用 arping 发送 ARP 请求检测设备是否在线
     
@@ -440,6 +447,7 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
     """
     import platform
     import shutil
+    import time
     system = platform.system().lower()
     
     try:
@@ -481,28 +489,52 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
             # 构建 arping 命令列表，尝试不同的接口
             arping_commands = []
             
-            if system == "linux":
-                # Linux arping (iputils 版本)
-                # 基本命令（自动选择接口）
-                base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout)), ip_address]
-                arping_commands.append(base_cmd)
-                
-                # 尝试指定可用接口
-                for iface in available_interfaces[:3]:  # 最多尝试3个接口
-                    iface_cmd = ["arping", "-I", iface, "-c", str(count), "-w", str(int(timeout)), ip_address]
+            # 1. 先使用缓存的工作接口
+            for cached_iface in ARPING_CACHE['working_interfaces']:
+                if cached_iface in available_interfaces:
+                    _LOGGER.debug("使用缓存的工作接口: %s", cached_iface)
+                    iface_cmd = ["arping", "-I", cached_iface, "-c", str(count), "-w", str(int(timeout)), ip_address]
                     arping_commands.append(iface_cmd)
-            elif system == "darwin":
-                # macOS arping (需要安装)
-                base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+            
+            # 2. 只有当基础命令之前工作过，才尝试基础命令
+            if ARPING_CACHE['base_cmd_working']:
+                if system == "linux":
+                    base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout)), ip_address]
+                elif system == "darwin":
+                    base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+                else:
+                    base_cmd = ["arping", "-c", str(count), ip_address]
                 arping_commands.append(base_cmd)
             else:
-                # 其他系统
-                base_cmd = ["arping", "-c", str(count), ip_address]
+                _LOGGER.debug("跳过基础命令，因为之前失败过")
+            
+            # 3. 尝试其他可用接口（最多2个新接口）
+            new_ifaces = [iface for iface in available_interfaces if iface not in ARPING_CACHE['working_interfaces']]
+            for iface in new_ifaces[:2]:  # 最多尝试2个新接口
+                iface_cmd = ["arping", "-I", iface, "-c", str(count), "-w", str(int(timeout)), ip_address]
+                arping_commands.append(iface_cmd)
+            
+            # 确保至少有一个命令
+            if not arping_commands and available_interfaces:
+                # 使用第一个可用接口
+                iface = available_interfaces[0]
+                iface_cmd = ["arping", "-I", iface, "-c", str(count), "-w", str(int(timeout)), ip_address]
+                arping_commands.append(iface_cmd)
+            elif not arping_commands:
+                # 没有可用接口，使用基础命令
+                if system == "linux":
+                    base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout)), ip_address]
+                elif system == "darwin":
+                    base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+                else:
+                    base_cmd = ["arping", "-c", str(count), ip_address]
                 arping_commands.append(base_cmd)
             
             # 尝试所有可能的 arping 命令
             is_online = False
             last_result = None
+            working_iface = None
+            
             for cmd_idx, cmd in enumerate(arping_commands):
                 try:
                     _LOGGER.debug("尝试 arping 命令 %d/%d: %s", cmd_idx + 1, len(arping_commands), cmd)
@@ -525,9 +557,31 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
                     if cmd_online:
                         is_online = True
                         _LOGGER.info("arping 命令成功: %s", cmd)
+                        
+                        # 记录工作的接口
+                        if "-I" in cmd:
+                            iface_idx = cmd.index("-I") + 1
+                            if iface_idx < len(cmd):
+                                working_iface = cmd[iface_idx]
+                                if working_iface and working_iface not in ARPING_CACHE['working_interfaces']:
+                                    ARPING_CACHE['working_interfaces'].append(working_iface)
+                                    # 限制缓存接口数量
+                                    if len(ARPING_CACHE['working_interfaces']) > 3:
+                                        ARPING_CACHE['working_interfaces'] = ARPING_CACHE['working_interfaces'][-3:]
+                        else:
+                            # 基础命令工作，记录状态
+                            ARPING_CACHE['base_cmd_working'] = True
+                        
                         break
+                    else:
+                        # 基础命令失败，记录状态
+                        if "-I" not in cmd:
+                            ARPING_CACHE['base_cmd_working'] = False
                 except Exception as cmd_err:
                     _LOGGER.debug("arping 命令执行失败: %s - %s", cmd, cmd_err)
+                    # 基础命令执行失败，记录状态
+                    if "-I" not in cmd:
+                        ARPING_CACHE['base_cmd_working'] = False
             
             # 记录最终结果
             if last_result:
@@ -543,6 +597,9 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
                 if arp_table_result:
                     _LOGGER.info("ARP 表检查成功，确认设备 %s 在线", ip_address)
                     is_online = True
+            
+            # 更新检查时间
+            ARPING_CACHE['last_check'] = time.time()
             
             return is_online
         else:
