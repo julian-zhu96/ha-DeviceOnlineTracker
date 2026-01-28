@@ -427,8 +427,7 @@ async def check_arp_table(ip_address: str) -> bool:
 
 # 接口缓存和命令状态记录
 ARPING_CACHE = {
-    'working_interfaces': [],  # 记录成功过的网络接口
-    'base_cmd_working': True,  # 基础命令是否工作
+    'working_interface': None,  # 记录最近成功的网络接口
     'last_check': 0  # 上次检查时间戳
 }
 
@@ -484,118 +483,84 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
                         return []
             
             available_interfaces = get_available_interfaces()
-            _LOGGER.debug("可用的网络接口: %s", available_interfaces)
+            # 减少日志输出，避免定时检测时日志过多
+            # _LOGGER.debug("可用的网络接口: %s", available_interfaces)
             
-            # 构建 arping 命令列表，尝试不同的接口
+            # 构建 arping 命令列表
             arping_commands = []
             
-            # 1. 先使用缓存的工作接口
-            for cached_iface in ARPING_CACHE['working_interfaces']:
-                if cached_iface in available_interfaces:
-                    _LOGGER.debug("使用缓存的工作接口: %s", cached_iface)
-                    iface_cmd = ["arping", "-I", cached_iface, "-c", str(count), "-w", str(int(timeout)), ip_address]
+            # 1. 优先使用最近成功的接口
+            if ARPING_CACHE['working_interface'] and ARPING_CACHE['working_interface'] in available_interfaces:
+                iface = ARPING_CACHE['working_interface']
+                iface_cmd = ["arping", "-I", iface, "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+                arping_commands.append(iface_cmd)
+            
+            # 2. 使用基础命令（自动选择接口）
+            if system == "linux":
+                base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+            elif system == "darwin":
+                base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+            else:
+                base_cmd = ["arping", "-c", str(count), ip_address]
+            arping_commands.append(base_cmd)
+            
+            # 3. 如果有其他可用接口，尝试第一个
+            if available_interfaces:
+                first_iface = available_interfaces[0]
+                if first_iface != ARPING_CACHE['working_interface']:
+                    iface_cmd = ["arping", "-I", first_iface, "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
                     arping_commands.append(iface_cmd)
             
-            # 2. 只有当基础命令之前工作过，才尝试基础命令
-            if ARPING_CACHE['base_cmd_working']:
-                if system == "linux":
-                    base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout)), ip_address]
-                elif system == "darwin":
-                    base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
-                else:
-                    base_cmd = ["arping", "-c", str(count), ip_address]
-                arping_commands.append(base_cmd)
-            else:
-                _LOGGER.debug("跳过基础命令，因为之前失败过")
+            # 限制命令数量，避免过多尝试
+            arping_commands = arping_commands[:3]  # 最多尝试3个命令
             
-            # 3. 尝试其他可用接口（最多2个新接口）
-            new_ifaces = [iface for iface in available_interfaces if iface not in ARPING_CACHE['working_interfaces']]
-            for iface in new_ifaces[:2]:  # 最多尝试2个新接口
-                iface_cmd = ["arping", "-I", iface, "-c", str(count), "-w", str(int(timeout)), ip_address]
-                arping_commands.append(iface_cmd)
-            
-            # 确保至少有一个命令
-            if not arping_commands and available_interfaces:
-                # 使用第一个可用接口
-                iface = available_interfaces[0]
-                iface_cmd = ["arping", "-I", iface, "-c", str(count), "-w", str(int(timeout)), ip_address]
-                arping_commands.append(iface_cmd)
-            elif not arping_commands:
-                # 没有可用接口，使用基础命令
-                if system == "linux":
-                    base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout)), ip_address]
-                elif system == "darwin":
-                    base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
-                else:
-                    base_cmd = ["arping", "-c", str(count), ip_address]
-                arping_commands.append(base_cmd)
-            
-            # 尝试所有可能的 arping 命令
+            # 尝试 arping 命令
             is_online = False
-            last_result = None
             working_iface = None
             
             for cmd_idx, cmd in enumerate(arping_commands):
                 try:
-                    _LOGGER.debug("尝试 arping 命令 %d/%d: %s", cmd_idx + 1, len(arping_commands), cmd)
+                    # 减少日志输出
+                    # _LOGGER.debug("尝试 arping 命令 %d/%d: %s", cmd_idx + 1, len(arping_commands), cmd)
                     result = await asyncio.get_event_loop().run_in_executor(
                         None,
                         lambda: subprocess.run(
                             cmd,
                             capture_output=True,
                             text=True,
-                            timeout=timeout + 2
+                            timeout=timeout + 1
                         )
                     )
-                    last_result = result
                     
                     # 检查是否收到响应
                     cmd_online = result.returncode == 0 or "reply" in result.stdout.lower()
-                    _LOGGER.debug("arping 命令 %s 结果: %s (returncode=%d, output=%s)", 
-                                 cmd, "在线" if cmd_online else "离线", result.returncode, result.stdout.strip())
+                    # 减少日志输出
+                    # _LOGGER.debug("arping 命令 %s 结果: %s (returncode=%d)", 
+                    #              cmd, "在线" if cmd_online else "离线", result.returncode)
                     
                     if cmd_online:
                         is_online = True
-                        _LOGGER.info("arping 命令成功: %s", cmd)
                         
                         # 记录工作的接口
                         if "-I" in cmd:
                             iface_idx = cmd.index("-I") + 1
                             if iface_idx < len(cmd):
                                 working_iface = cmd[iface_idx]
-                                if working_iface and working_iface not in ARPING_CACHE['working_interfaces']:
-                                    ARPING_CACHE['working_interfaces'].append(working_iface)
-                                    # 限制缓存接口数量
-                                    if len(ARPING_CACHE['working_interfaces']) > 3:
-                                        ARPING_CACHE['working_interfaces'] = ARPING_CACHE['working_interfaces'][-3:]
-                        else:
-                            # 基础命令工作，记录状态
-                            ARPING_CACHE['base_cmd_working'] = True
+                                ARPING_CACHE['working_interface'] = working_iface
                         
                         break
-                    else:
-                        # 基础命令失败，记录状态
-                        if "-I" not in cmd:
-                            ARPING_CACHE['base_cmd_working'] = False
-                except Exception as cmd_err:
-                    _LOGGER.debug("arping 命令执行失败: %s - %s", cmd, cmd_err)
-                    # 基础命令执行失败，记录状态
-                    if "-I" not in cmd:
-                        ARPING_CACHE['base_cmd_working'] = False
+                except Exception:
+                    # 静默处理错误，避免日志过多
+                    pass
             
-            # 记录最终结果
-            if last_result:
-                _LOGGER.debug("arping %s 最终结果: %s", 
-                             ip_address, "在线" if is_online else "离线")
-            else:
-                _LOGGER.debug("所有 arping 命令都执行失败")
-            
-            # 如果 arping 都失败，尝试直接检查 ARP 表
+            # 如果 arping 失败，尝试直接检查 ARP 表
             if not is_online:
-                _LOGGER.debug("所有 arping 命令失败，尝试直接检查 ARP 表")
+                # 减少日志输出
+                # _LOGGER.debug("arping 命令失败，尝试直接检查 ARP 表")
                 arp_table_result = await check_arp_table(ip_address)
                 if arp_table_result:
-                    _LOGGER.info("ARP 表检查成功，确认设备 %s 在线", ip_address)
+                    # 减少日志输出
+                    # _LOGGER.debug("ARP 表检查成功，确认设备 %s 在线", ip_address)
                     is_online = True
             
             # 更新检查时间
@@ -705,19 +670,23 @@ async def check_device_status(
             
         elif detection_method == DETECTION_ARP:
             # 仅使用 ARP 检测（适合移动设备）
-            _LOGGER.info("开始 ARP 模式检测设备 %s", ip_address)
+            # 减少日志输出
+            # _LOGGER.info("开始 ARP 模式检测设备 %s", ip_address)
             
             # 1. 首先清理并刷新 ARP 表
-            _LOGGER.debug("尝试刷新 ARP 表以获取最新状态")
+            # 减少日志输出
+            # _LOGGER.debug("尝试刷新 ARP 表以获取最新状态")
             await asyncio.sleep(0.2)
             
             # 2. 发送多次 ARP 请求以提高成功率
             arp_success = False
             for attempt in range(3):
-                _LOGGER.debug("ARP 检测尝试 %d/3 for %s", attempt + 1, ip_address)
+                # 减少日志输出
+                # _LOGGER.debug("ARP 检测尝试 %d/3 for %s", attempt + 1, ip_address)
                 arp_result = await arping(ip_address, count=ping_count)
                 if arp_result:
-                    _LOGGER.info("ARP 检测尝试 %d/3 成功: %s", attempt + 1, ip_address)
+                    # 减少日志输出
+                    # _LOGGER.info("ARP 检测尝试 %d/3 成功: %s", attempt + 1, ip_address)
                     arp_success = True
                     break
                 await asyncio.sleep(0.5)
@@ -726,7 +695,8 @@ async def check_device_status(
             
             # 3. ARP 失败时，详细检查 ARP 表
             if not is_online:
-                _LOGGER.warning("%s ARP 检测失败，开始详细排查", ip_address)
+                # 减少日志输出
+                # _LOGGER.warning("%s ARP 检测失败，开始详细排查", ip_address)
                 
                 # 直接检查 ARP 表
                 import platform
@@ -744,18 +714,25 @@ async def check_device_status(
                                 timeout=5
                             )
                         )
-                        _LOGGER.debug("Windows 完整 ARP 表: %s", result.stdout[:500])
-                    except Exception as e:
-                        _LOGGER.debug("检查 Windows ARP 表失败: %s", e)
+                        # 减少日志输出
+                        # _LOGGER.debug("Windows 完整 ARP 表: %s", result.stdout[:500])
+                    except Exception:
+                        # 减少日志输出
+                        # _LOGGER.debug("检查 Windows ARP 表失败: %s", e)
+                        pass
                 
                 # 4. 尝试 ping 作为备选
-                _LOGGER.debug("%s ARP 检测失败，尝试 ping 作为备选", ip_address)
+                # 减少日志输出
+                # _LOGGER.debug("%s ARP 检测失败，尝试 ping 作为备选", ip_address)
                 ping_result = await _ping_check(ip_address, ping_count)
                 if ping_result:
-                    _LOGGER.info("%s ping 检测成功，确认在线", ip_address)
+                    # 减少日志输出
+                    # _LOGGER.info("%s ping 检测成功，确认在线", ip_address)
                     is_online = True
                 else:
-                    _LOGGER.debug("%s ping 检测也失败", ip_address)
+                    # 减少日志输出
+                    # _LOGGER.debug("%s ping 检测也失败", ip_address)
+                    pass
             
         elif detection_method == DETECTION_AUTO:
             # 自动模式：先尝试 ARP，失败则使用 ping
@@ -865,27 +842,31 @@ async def update_device_data(
             # 设备在线，重置失败计数
             device_data["fail_count"] = 0
             final_online_status = True
-            _LOGGER.debug("设备 %s 检测在线，重置失败计数",  display_name)
+            # 减少日志输出
+            # _LOGGER.debug("设备 %s 检测在线，重置失败计数",  display_name)
         else:
             # 设备检测离线
             if reset_fail_count:
                 # API调用时使用临时计数，不影响原始计数
                 temp_fail_count = 1
-                _LOGGER.debug("设备 %s 检测离线（API调用），临时失败计数: %d/%d, 模式: %s", 
-                             display_name, temp_fail_count, offline_threshold, mode) 
+                # 减少日志输出
+                # _LOGGER.debug("设备 %s 检测离线（API调用），临时失败计数: %d/%d, 模式: %s", 
+                #              display_name, temp_fail_count, offline_threshold, mode)
             else:
                 # 定时任务时累积原始计数
                 device_data["fail_count"] += 1
-                _LOGGER.debug("设备 %s 检测离线，失败计数: %d/%d, 模式: %s", 
-                             display_name, device_data["fail_count"], offline_threshold, mode) 
+                # 减少日志输出
+                # _LOGGER.debug("设备 %s 检测离线，失败计数: %d/%d, 模式: %s", 
+                #              display_name, device_data["fail_count"], offline_threshold, mode)
             
             # 快速重试模式：检测到离线时立即连续重试
             if mode == MODE_RETRY and (was_online or reset_fail_count):
                 # 计算当前使用的失败计数
                 current_fail_count = temp_fail_count if reset_fail_count else device_data["fail_count"]
                 if current_fail_count < offline_threshold:
-                    _LOGGER.info("设备 %s 从在线变为离线，开始快速重试确认 (%d/%d)", 
-                                display_name, current_fail_count, offline_threshold)
+                    # 只在状态变化时输出日志
+                    if was_online:
+                        _LOGGER.info("设备 %s 从在线变为离线，开始快速重试确认", display_name)
                     
                     retry_success = False
                     for retry in range(offline_threshold - current_fail_count):
@@ -896,25 +877,31 @@ async def update_device_data(
                             if reset_fail_count:
                                 # API调用时，重试成功则保持在线状态
                                 final_online_status = True
-                                _LOGGER.info("设备 %s 快速重试第 %d 次成功，确认在线", display_name, retry + 1)
+                                # 只在状态变化时输出日志
+                                if was_online:
+                                    _LOGGER.info("设备 %s 快速重试成功，确认在线", display_name)
                             else:
                                 # 定时任务时，重试成功则重置原始计数
                                 device_data["fail_count"] = 0
                                 final_online_status = True
-                                _LOGGER.info("设备 %s 快速重试第 %d 次成功，确认在线", display_name, retry + 1)
+                                # 只在状态变化时输出日志
+                                if was_online:
+                                    _LOGGER.info("设备 %s 快速重试成功，确认在线", display_name)
                             retry_success = True
                             break
                         else:
                             if reset_fail_count:
                                 # API调用时，使用临时计数
                                 temp_fail_count += 1
-                                _LOGGER.debug("设备 %s 快速重试第 %d 次失败，临时失败计数: %d/%d", 
-                                             display_name, retry + 1, temp_fail_count, offline_threshold)
+                                # 减少日志输出
+                                # _LOGGER.debug("设备 %s 快速重试第 %d 次失败，临时失败计数: %d/%d", 
+                                #              display_name, retry + 1, temp_fail_count, offline_threshold)
                             else:
                                 # 定时任务时，累积原始计数
                                 device_data["fail_count"] += 1
-                                _LOGGER.debug("设备 %s 快速重试第 %d 次失败，失败计数: %d/%d", 
-                                             display_name, retry + 1, device_data["fail_count"], offline_threshold)
+                                # 减少日志输出
+                                # _LOGGER.debug("设备 %s 快速重试第 %d 次失败，失败计数: %d/%d", 
+                                #              display_name, retry + 1, device_data["fail_count"], offline_threshold)
                     
                     if retry_success:
                         # 重试成功，已经设置了final_online_status，直接进入下一阶段
