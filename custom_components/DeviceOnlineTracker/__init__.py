@@ -861,19 +861,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     async def async_update_data():
         """Fetch data from API endpoint."""
+        # 每次检测时读取最新的enabled状态
+        latest_config = hass.data.get(f"{DOMAIN}_config", {}).get(entry.entry_id, {})
+        latest_enabled = latest_config.get("enabled", DEFAULT_ENABLED)
+        
         # 检查设备是否启用
-        if not enabled:
+        if not latest_enabled:
             _LOGGER.debug("设备 %s 已禁用，跳过定时检测", device_name)
             return device_data
         
+        # 使用最新的配置参数
+        latest_offline_threshold = latest_config.get("offline_threshold", offline_threshold)
+        latest_ping_count = latest_config.get("ping_count", ping_count)
+        latest_retry_interval = latest_config.get("retry_interval", retry_interval)
+        latest_retry_ping_count = latest_config.get("retry_ping_count", retry_ping_count)
+        latest_detection_method = latest_config.get("detection_method", detection_method)
+        
         return await update_device_data(
             device_data, host, store, entry.entry_id,
-            offline_threshold=offline_threshold,
-            ping_count=ping_count,
-            retry_interval=retry_interval,
-            retry_ping_count=retry_ping_count,
+            offline_threshold=latest_offline_threshold,
+            ping_count=latest_ping_count,
+            retry_interval=latest_retry_interval,
+            retry_ping_count=latest_retry_ping_count,
             mode=MODE_RETRY,  # 定时扫描默认使用快速重试模式，提高检测可靠性
-            detection_method=detection_method
+            detection_method=latest_detection_method
         )
 
     coordinator = DataUpdateCoordinator(
@@ -889,9 +900,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
+    # 注册配置更新回调
+    entry.async_on_unload(entry.add_update_listener(async_update_options))
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     
     return True
+
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Reload a config entry."""
+    # 先卸载
+    await async_unload_entry(hass, entry)
+    # 重新加载
+    return await async_setup_entry(hass, entry)
+
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Update options."""
+    # 当选项更新时，重新加载配置
+    await async_reload_entry(hass, entry)
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
