@@ -304,11 +304,12 @@ def get_ip_from_mac(mac_address: str) -> Optional[str]:
         _LOGGER.error("获取IP地址时出错: %s", err)
         return None
 
-async def check_arp_table(ip_address: str) -> bool:
+async def check_arp_table(ip_address: str, device_name: str = None) -> bool:
     """检查 ARP 表中是否存在指定 IP 地址的有效条目
     
     Args:
         ip_address: 要检查的 IP 地址
+        device_name: 设备名称，用于日志
         
     Returns:
         bool: ARP 表中是否存在有效条目（设备在线）
@@ -338,7 +339,21 @@ async def check_arp_table(ip_address: str) -> bool:
                     )
                     
                     output = result.stdout.strip()
-                    _LOGGER.debug("Linux ARP 命令 %s 输出: %s", cmd, output)
+                    # 限制 ARP 命令输出的日志，避免过多冗余信息
+                    if len(cmd) > 2 and cmd[2] == "show" and len(cmd) == 3:
+                        # 对于 "ip neigh show" 命令（查看所有 ARP 条目），只输出与当前 IP 相关的内容
+                        relevant_lines = []
+                        for line in output.split('\n'):
+                            if ip_address in line:
+                                relevant_lines.append(line)
+                        if relevant_lines:
+                            filtered_output = '\n'.join(relevant_lines)
+                            _LOGGER.debug("Linux ARP 命令 %s 输出（过滤后）: %s", cmd, filtered_output)
+                        else:
+                            _LOGGER.debug("Linux ARP 命令 %s 输出: 无相关条目", cmd)
+                    else:
+                        # 对于其他命令，正常输出
+                        _LOGGER.debug("Linux ARP 命令 %s 输出: %s", cmd, output)
                     
                     if output:
                         # 检查是否有有效的 ARP 条目
@@ -347,23 +362,35 @@ async def check_arp_table(ip_address: str) -> bool:
                         for line in lines:
                             line = line.strip()
                             if ip_address in line:
-                                # 检查是否为有效状态（排除 FAILED）
-                                if "FAILED" not in line.upper():
-                                    # 检查是否为 STALE 状态
-                                    if "STALE" in line.upper():
-                                        _LOGGER.info("ARP 表检测: %s 存在 STALE 条目（已过期，视为离线）: %s", 
-                                                    ip_address, line)
-                                        continue  # 跳过 STALE 状态，视为离线
-                                    
-                                    # 有效的 ARP 状态：REACHABLE, DELAY, PROBE
-                                    valid_states = ["REACHABLE", "DELAY", "PROBE"]
-                                    for state in valid_states:
-                                        if state in line.upper():
-                                            _LOGGER.info("ARP 表检测: %s 存在有效条目 (状态: %s): %s", 
-                                                        ip_address, state, line)
-                                            has_valid_entry = True
-                                            break
+                                # 检查是否为 FAILED 状态
+                                if "FAILED" in line.upper():
+                                    _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在 FAILED 条目（视为离线）: %s", 
+                                                ip_address, device_name or ip_address, line)
+                                    continue
+                                
+                                # 检查是否为 STALE 状态
+                                if "STALE" in line.upper():
+                                    _LOGGER.info("ARP 表检测: %s (设备: %s) 存在 STALE 条目（已过期，视为离线）: %s", 
+                                                ip_address, device_name or ip_address, line)
+                                    continue
+                                
+                                # 检查是否为其他有效状态
+                                valid_states = ["REACHABLE", "DELAY", "PROBE"]
+                                valid_state_found = False
+                                for state in valid_states:
+                                    if state in line.upper():
+                                        _LOGGER.info("ARP 表检测: %s (设备: %s) 存在有效条目 (状态: %s): %s", 
+                                                    ip_address, device_name or ip_address, state, line)
+                                        has_valid_entry = True
+                                        valid_state_found = True
+                                        break
+                                
+                                # 如果没有找到有效状态，视为离线
+                                if not valid_state_found:
+                                    _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在未知状态条目，视为离线: %s", ip_address, device_name or ip_address, line)
+                                    continue
                         
+                        # 检查是否有有效条目
                         if has_valid_entry:
                             return True
                 except Exception as cmd_err:
@@ -383,7 +410,7 @@ async def check_arp_table(ip_address: str) -> bool:
             # 检查是否有有效的 MAC 地址（不是 incomplete）
             if output and ip_address in output and "no entry" not in output.lower():
                 if "incomplete" not in output.lower():
-                    _LOGGER.debug("ARP 表检测: %s 存在有效条目: %s", ip_address, output)
+                    _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在有效条目: %s", ip_address, device_name or ip_address, output)
                     return True
         else:
             # Windows 或其他系统: 使用 arp -a
@@ -422,12 +449,12 @@ async def check_arp_table(ip_address: str) -> bool:
                                 if '-' in line or ':' in line:
                                     # 排除无效条目
                                     if 'invalid' not in line.lower():
-                                        _LOGGER.debug("ARP 表检测: %s 存在有效条目: %s", ip_address, line)
+                                        _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在有效条目: %s", ip_address, device_name or ip_address, line)
                                         return True
                 except Exception as cmd_err:
                     _LOGGER.debug("ARP 命令执行失败: %s", cmd_err)
         
-        _LOGGER.debug("ARP 表检测: %s 无有效条目", ip_address)
+        _LOGGER.debug("ARP 表检测: %s (设备: %s) 无有效条目", ip_address, device_name or ip_address)
         return False
     except Exception as err:
         _LOGGER.error("检查 ARP 表时出错: %s", err)
@@ -439,7 +466,7 @@ ARPING_CACHE = {
     'last_check': 0  # 上次检查时间戳
 }
 
-async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
+async def arping(ip_address: str, count: int = 3, timeout: float = 2.0, device_name: str = None) -> bool:
     """使用 arping 发送 ARP 请求检测设备是否在线
     
     ARP 请求的优势：即使设备锁屏或进入省电模式，只要连接到网络就必须响应 ARP
@@ -448,6 +475,7 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
         ip_address: 要检测的 IP 地址
         count: 发送的 ARP 请求数量
         timeout: 超时时间（秒）
+        device_name: 设备名称，用于日志
         
     Returns:
         bool: 设备是否响应了 ARP 请求
@@ -569,7 +597,7 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
             if not is_online:
                 # 减少日志输出
                 # _LOGGER.debug("arping 命令失败，尝试直接检查 ARP 表")
-                arp_table_result = await check_arp_table(ip_address)
+                arp_table_result = await check_arp_table(ip_address, device_name=device_name)
                 if arp_table_result:
                     # 减少日志输出
                     # _LOGGER.debug("ARP 表检查成功，确认设备 %s 在线", ip_address)
@@ -638,7 +666,7 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
             await asyncio.sleep(0.3)
             
             # 检查 ARP 表
-            return await check_arp_table(ip_address)
+            return await check_arp_table(ip_address, device_name=device_name)
             
     except asyncio.TimeoutError:
         _LOGGER.debug("arping %s 超时", ip_address)
@@ -650,7 +678,8 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
 async def check_device_status(
     host: str, 
     ping_count: int = DEFAULT_PING_COUNT,
-    detection_method: str = DEFAULT_DETECTION_METHOD
+    detection_method: str = DEFAULT_DETECTION_METHOD,
+    device_name: str = None  # 设备名称，用于日志
 ) -> Tuple[bool, datetime]:
     """检查设备在线状态
     
@@ -658,6 +687,7 @@ async def check_device_status(
         host: 设备主机地址或MAC地址（格式：xx:xx:xx:xx:xx:xx）
         ping_count: 发送的ping包数量，任意一个成功即判定在线
         detection_method: 检测方式 (ping/arp/auto)
+        device_name: 设备名称，用于日志
         
     Returns:
         Tuple[bool, datetime]: 返回设备是否在线和检查时间
@@ -678,7 +708,7 @@ async def check_device_status(
         
         if detection_method == DETECTION_PING:
             # 仅使用 ICMP ping
-            is_online = await _ping_check(ip_address, ping_count)
+            is_online = await _ping_check(ip_address, ping_count, device_name=device_name)
             
         elif detection_method == DETECTION_ARP:
             # 仅使用 ARP 检测（适合移动设备）
@@ -695,7 +725,7 @@ async def check_device_status(
             for attempt in range(3):
                 # 减少日志输出
                 # _LOGGER.debug("ARP 检测尝试 %d/3 for %s", attempt + 1, ip_address)
-                arp_result = await arping(ip_address, count=ping_count)
+                arp_result = await arping(ip_address, count=ping_count, device_name=device_name)
                 if arp_result:
                     # 减少日志输出
                     # _LOGGER.info("ARP 检测尝试 %d/3 成功: %s", attempt + 1, ip_address)
@@ -736,7 +766,7 @@ async def check_device_status(
                 # 4. 尝试 ping 作为备选
                 # 减少日志输出
                 # _LOGGER.debug("%s ARP 检测失败，尝试 ping 作为备选", ip_address)
-                ping_result = await _ping_check(ip_address, ping_count)
+                ping_result = await _ping_check(ip_address, ping_count, device_name=device_name)
                 if ping_result:
                     # 减少日志输出
                     # _LOGGER.info("%s ping 检测成功，确认在线", ip_address)
@@ -749,34 +779,35 @@ async def check_device_status(
         elif detection_method == DETECTION_AUTO:
             # 自动模式：先尝试 ARP，失败则使用 ping
             # ARP 更适合移动设备，因为即使锁屏也能响应
-            is_online = await arping(ip_address, count=ping_count)
+            is_online = await arping(ip_address, count=ping_count, device_name=device_name)
             if not is_online:
                 _LOGGER.debug("%s ARP 检测失败，尝试 ping 检测", ip_address)
-                is_online = await _ping_check(ip_address, ping_count)
+                is_online = await _ping_check(ip_address, ping_count, device_name=device_name)
         else:
             # 默认使用 ARP + ping 组合检测
-            is_online = await arping(ip_address, count=ping_count)
+            is_online = await arping(ip_address, count=ping_count, device_name=device_name)
             if not is_online:
                 _LOGGER.debug("%s ARP 检测失败，尝试 ping 作为备选", ip_address)
-                ping_result = await _ping_check(ip_address, ping_count)
+                ping_result = await _ping_check(ip_address, ping_count, device_name=device_name)
                 if ping_result:
                     _LOGGER.debug("%s ping 检测成功，确认在线", ip_address)
                     is_online = True
         
-        _LOGGER.debug("设备 %s 检测结果: %s (方式: %s)", 
-                     host, "在线" if is_online else "离线", detection_method)
+        _LOGGER.debug("设备 %s (IP: %s) 检测结果: %s (方式: %s)", 
+                     device_name or host, ip_address, "在线" if is_online else "离线", detection_method)
         return is_online, current_time
         
     except Exception as err:
         _LOGGER.error("检查设备状态时出错: %s", err)
         return False, datetime.now()
 
-async def _ping_check(ip_address: str, ping_count: int) -> bool:
+async def _ping_check(ip_address: str, ping_count: int, device_name: str = None) -> bool:
     """使用 ICMP ping 检测设备
     
     Args:
         ip_address: IP 地址
         ping_count: ping 包数量
+        device_name: 设备名称，用于日志
         
     Returns:
         bool: 是否在线
@@ -784,8 +815,8 @@ async def _ping_check(ip_address: str, ping_count: int) -> bool:
     try:
         host_ping = await async_ping(ip_address, count=ping_count, timeout=2, interval=0.5)
         is_online = host_ping.packets_received > 0
-        _LOGGER.debug("ping %s: %s (收到 %d/%d 包)", 
-                     ip_address, "在线" if is_online else "离线",
+        _LOGGER.debug("ping 设备 %s (IP: %s): %s (收到 %d/%d 包)", 
+                     device_name or ip_address, ip_address, "在线" if is_online else "离线",
                      host_ping.packets_received, ping_count)
         return is_online
     except Exception as err:
@@ -837,7 +868,8 @@ async def update_device_data(
         device_name = device_data['name']
         _LOGGER.debug("开始检测设备 %s (IP: %s)", device_name, host)
         
-        is_online, current_time = await check_device_status(host, ping_count, detection_method)
+        is_online, current_time = await check_device_status(host, ping_count, detection_method, device_name=device_name)
+        current_date = current_time.date()
         current_date = current_time.date()
         was_online = device_data.get("is_online", False)
         
