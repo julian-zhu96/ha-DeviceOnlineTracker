@@ -375,7 +375,7 @@ async def check_arp_table(ip_address: str, device_name: str = None) -> bool:
                                     continue
                                 
                                 # 检查是否为其他有效状态
-                                valid_states = ["REACHABLE", "DELAY", "PROBE"]
+                                valid_states = ["REACHABLE", "DELAY"]
                                 valid_state_found = False
                                 for state in valid_states:
                                     if state in line.upper():
