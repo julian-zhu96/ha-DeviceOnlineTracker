@@ -10,7 +10,8 @@
                     "scan_interval": "扫描间隔（秒）",
                     "offline_threshold": "离线判定阈值（连续失败次数）",
                     "ping_count": "单次检测Ping包数量",
-                    "retry_ping_count": "重试时Ping包数量"
+                    "retry_ping_count": "重试时Ping包数量",
+                    "detection_method": "检测方式"
                 }
             }
         },
@@ -31,8 +32,18 @@
                     "scan_interval": "扫描间隔（秒）",
                     "offline_threshold": "离线判定阈值（连续失败次数）",
                     "ping_count": "单次检测Ping包数量",
-                    "retry_ping_count": "重试时Ping包数量"
+                    "retry_ping_count": "重试时Ping包数量",
+                    "detection_method": "检测方式"
                 }
+            }
+        }
+    },
+    "selector": {
+        "detection_method": {
+            "options": {
+                "ping": "Ping（ICMP）- 适合服务器",
+                "arp": "ARP - 适合移动设备（推荐）",
+                "auto": "自动（先Ping后ARP）"
             }
         }
     }

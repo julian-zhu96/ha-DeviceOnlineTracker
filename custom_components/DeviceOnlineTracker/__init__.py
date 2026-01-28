@@ -43,10 +43,16 @@ CONF_RETRY_INTERVAL = "retry_interval"
 CONF_RETRY_PING_COUNT = "retry_ping_count"
 CONF_ENABLED = "enabled"
 CONF_MAX_CONCURRENT = "max_concurrent"  # 最大并发数
+CONF_DETECTION_METHOD = "detection_method"  # 检测方式
 
-# 检测模式
+# 检测模式（用于离线确认的重试策略）
 MODE_PARALLEL = "parallel"  # 并行ping（默认，快速）
 MODE_RETRY = "retry"  # 快速重试（更可靠）
+
+# 检测方式（用于检测设备在线状态的方法）
+DETECTION_PING = "ping"  # 仅使用 ICMP ping
+DETECTION_ARP = "arp"    # 仅使用 ARP 检测（适合移动设备）
+DETECTION_AUTO = "auto"  # 自动：先 ping，失败则 arp
 
 # 默认值
 DEFAULT_SCAN_INTERVAL = 60  # 秒
@@ -56,6 +62,7 @@ DEFAULT_RETRY_INTERVAL = 5  # 快速重试间隔（秒）
 DEFAULT_RETRY_PING_COUNT = 3  # 重试时发送的ping包数量
 DEFAULT_ENABLED = True  # 默认启用检测
 DEFAULT_MAX_CONCURRENT = 5  # 默认最大并发数
+DEFAULT_DETECTION_METHOD = DETECTION_ARP  # 默认使用 ARP（适合移动设备）
 
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
 
@@ -110,6 +117,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
             ping_count = device_config.get("ping_count", DEFAULT_PING_COUNT)
             retry_interval = device_config.get("retry_interval", DEFAULT_RETRY_INTERVAL)
             retry_ping_count = device_config.get("retry_ping_count", DEFAULT_RETRY_PING_COUNT)
+            detection_method = device_config.get("detection_method", DEFAULT_DETECTION_METHOD)
             
             if host and device_data is not None and store:
                 await update_device_data(
@@ -119,7 +127,8 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
                     retry_interval=retry_interval,
                     retry_ping_count=retry_ping_count,
                     mode=mode,
-                    reset_fail_count=True  # API调用时重置失败计数，立即判断状态
+                    reset_fail_count=True,  # API调用时重置失败计数，立即判断状态
+                    detection_method=detection_method
                 )
                 coordinator.async_set_updated_data(device_data)
             else:
@@ -195,6 +204,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
             ping_count = device_config.get("ping_count", DEFAULT_PING_COUNT)
             retry_interval = device_config.get("retry_interval", DEFAULT_RETRY_INTERVAL)
             retry_ping_count = device_config.get("retry_ping_count", DEFAULT_RETRY_PING_COUNT)
+            detection_method = device_config.get("detection_method", DEFAULT_DETECTION_METHOD)
             
             if host and device_data is not None and store:
                 await update_device_data(
@@ -204,7 +214,8 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
                     retry_interval=retry_interval,
                     retry_ping_count=retry_ping_count,
                     mode=mode,
-                    reset_fail_count=True  # API调用时重置失败计数，立即判断状态
+                    reset_fail_count=True,  # API调用时重置失败计数，立即判断状态
+                    detection_method=detection_method
                 )
                 coordinator.async_set_updated_data(device_data)
             else:
@@ -293,62 +304,265 @@ def get_ip_from_mac(mac_address: str) -> Optional[str]:
         _LOGGER.error("获取IP地址时出错: %s", err)
         return None
 
-async def check_device_status(host: str, ping_count: int = DEFAULT_PING_COUNT) -> Tuple[bool, datetime]:
-    """检查设备在线状态（并行发送多个ping包）
+async def check_arp_table(ip_address: str) -> bool:
+    """检查 ARP 表中是否存在指定 IP 地址的有效条目
+    
+    Args:
+        ip_address: 要检查的 IP 地址
+        
+    Returns:
+        bool: ARP 表中是否存在有效条目（设备在线）
+    """
+    import platform
+    system = platform.system().lower()
+    
+    try:
+        if system == "linux":
+            # Linux: 使用 ip neigh 或读取 /proc/net/arp
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["ip", "neigh", "show", ip_address],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+            )
+            output = result.stdout.strip()
+            # 检查是否有有效的 ARP 条目（REACHABLE, STALE, DELAY, PROBE 都表示设备存在）
+            if output and ip_address in output:
+                # 排除 FAILED 状态
+                if "FAILED" not in output.upper():
+                    _LOGGER.debug("ARP 表检测: %s 存在有效条目: %s", ip_address, output)
+                    return True
+        elif system == "darwin":
+            # macOS: 使用 arp -n
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["arp", "-n", ip_address],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+            )
+            output = result.stdout.strip()
+            # 检查是否有有效的 MAC 地址（不是 incomplete）
+            if output and ip_address in output and "no entry" not in output.lower():
+                if "incomplete" not in output.lower():
+                    _LOGGER.debug("ARP 表检测: %s 存在有效条目: %s", ip_address, output)
+                    return True
+        else:
+            # Windows 或其他系统: 使用 arp -a
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["arp", "-a", ip_address],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+            )
+            if ip_address in result.stdout:
+                _LOGGER.debug("ARP 表检测: %s 存在条目", ip_address)
+                return True
+        
+        _LOGGER.debug("ARP 表检测: %s 无有效条目", ip_address)
+        return False
+    except Exception as err:
+        _LOGGER.error("检查 ARP 表时出错: %s", err)
+        return False
+
+async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
+    """使用 arping 发送 ARP 请求检测设备是否在线
+    
+    ARP 请求的优势：即使设备锁屏或进入省电模式，只要连接到网络就必须响应 ARP
+    
+    Args:
+        ip_address: 要检测的 IP 地址
+        count: 发送的 ARP 请求数量
+        timeout: 超时时间（秒）
+        
+    Returns:
+        bool: 设备是否响应了 ARP 请求
+    """
+    import platform
+    import shutil
+    system = platform.system().lower()
+    
+    try:
+        # 首先检查 arping 是否可用
+        arping_path = shutil.which("arping")
+        
+        if arping_path:
+            # 使用 arping 命令
+            if system == "linux":
+                # Linux arping (iputils 版本)
+                cmd = ["arping", "-c", str(count), "-w", str(int(timeout)), ip_address]
+            elif system == "darwin":
+                # macOS arping (需要安装)
+                cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+            else:
+                cmd = ["arping", "-c", str(count), ip_address]
+            
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout + 2
+                )
+            )
+            
+            # 检查是否收到响应
+            is_online = result.returncode == 0 or "reply" in result.stdout.lower()
+            _LOGGER.debug("arping %s 结果: %s (returncode=%d)", 
+                         ip_address, "在线" if is_online else "离线", result.returncode)
+            return is_online
+        else:
+            # arping 不可用，使用主动触发 ARP 的方式
+            _LOGGER.debug("arping 不可用，使用 socket 触发 ARP 方式检测 %s", ip_address)
+            
+            # 使用多种方式尝试触发 ARP 表更新
+            # 方式1: 尝试建立 TCP 连接（会触发 ARP 请求，即使端口关闭）
+            # 方式2: 发送 UDP 包（同样会触发 ARP）
+            # 方式3: ping（作为备选）
+            
+            async def trigger_arp_via_socket():
+                """通过 socket 连接触发 ARP 请求"""
+                import socket
+                
+                def _socket_trigger():
+                    # 尝试多个常见端口
+                    for port in [80, 443, 7, 22, 53]:
+                        try:
+                            # TCP 连接尝试（即使失败也会触发 ARP）
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(0.5)
+                            sock.connect_ex((ip_address, port))
+                            sock.close()
+                            return True
+                        except:
+                            pass
+                        
+                        try:
+                            # UDP 发送（同样会触发 ARP）
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                            sock.settimeout(0.5)
+                            sock.sendto(b'', (ip_address, port))
+                            sock.close()
+                            return True
+                        except:
+                            pass
+                    return False
+                
+                await asyncio.get_event_loop().run_in_executor(None, _socket_trigger)
+            
+            # 触发 ARP
+            await trigger_arp_via_socket()
+            
+            # 同时发送 ping 作为备选触发方式
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: subprocess.run(
+                        ["ping", "-c", "1", "-W", "1", ip_address],
+                        capture_output=True,
+                        timeout=2
+                    )
+                )
+            except:
+                pass
+            
+            # 等待 ARP 表更新
+            await asyncio.sleep(0.3)
+            
+            # 检查 ARP 表
+            return await check_arp_table(ip_address)
+            
+    except asyncio.TimeoutError:
+        _LOGGER.debug("arping %s 超时", ip_address)
+        return False
+    except Exception as err:
+        _LOGGER.error("arping 检测时出错: %s", err)
+        return False
+
+async def check_device_status(
+    host: str, 
+    ping_count: int = DEFAULT_PING_COUNT,
+    detection_method: str = DEFAULT_DETECTION_METHOD
+) -> Tuple[bool, datetime]:
+    """检查设备在线状态
     
     Args:
         host: 设备主机地址或MAC地址（格式：xx:xx:xx:xx:xx:xx）
         ping_count: 发送的ping包数量，任意一个成功即判定在线
+        detection_method: 检测方式 (ping/arp/auto)
         
     Returns:
         Tuple[bool, datetime]: 返回设备是否在线和检查时间
     """
     try:
         current_time = datetime.now()
+        ip_address = host
         
-        # 检查是否为MAC地址
-        if ":" in host:
-            # 先获取MAC地址对应的IP
+        # 检查是否为MAC地址，如果是则转换为 IP
+        if ":" in host and host.count(":") >= 2:
             ip_address = get_ip_from_mac(host)
-            if ip_address:
-                _LOGGER.debug("开始检测MAC地址: %s, 对应IP: %s, ping_count=%d", 
-                             host, ip_address, ping_count)
-                # 使用ping检测IP地址，发送多个包
-                host_ping = await async_ping(ip_address, count=ping_count, timeout=2, interval=0.5)
-                # 只要有一个包收到响应就算在线
-                is_online = host_ping.packets_received > 0
-                _LOGGER.debug("MAC地址 %s (IP: %s) 检测结果: %s (收到 %d/%d 包)", 
-                            host, ip_address, "在线" if is_online else "离线",
-                            host_ping.packets_received, ping_count)
-            else:
-                _LOGGER.warning("无法获取MAC地址 %s 对应的IP地址，尝试直接ping", host)
-                # 如果无法获取IP，尝试直接ping MAC地址
-                try:
-                    interface = get_default_interface()
-                    result = subprocess.run(
-                        ["ping", "-c", str(ping_count), "-w", "3", host],
-                        capture_output=True,
-                        text=True,
-                        check=False
-                    )
-                    is_online = result.returncode == 0
-                except Exception as err:
-                    _LOGGER.error("ping MAC地址失败: %s", err)
-                    is_online = False
-        else:
-            # 使用ping检测IP地址
-            _LOGGER.debug("开始检测IP地址: %s, ping_count=%d", host, ping_count)
-            host_ping = await async_ping(host, count=ping_count, timeout=2, interval=0.5)
-            # 只要有一个包收到响应就算在线
-            is_online = host_ping.packets_received > 0
-            _LOGGER.debug("IP地址 %s 检测结果: %s (收到 %d/%d 包)", 
-                         host, "在线" if is_online else "离线",
-                         host_ping.packets_received, ping_count)
+            if not ip_address:
+                _LOGGER.warning("无法获取MAC地址 %s 对应的IP地址", host)
+                return False, current_time
+            _LOGGER.debug("MAC地址 %s 对应IP: %s", host, ip_address)
+        
+        is_online = False
+        
+        if detection_method == DETECTION_PING:
+            # 仅使用 ICMP ping
+            is_online = await _ping_check(ip_address, ping_count)
             
+        elif detection_method == DETECTION_ARP:
+            # 仅使用 ARP 检测（适合移动设备）
+            is_online = await arping(ip_address, count=ping_count)
+            
+        elif detection_method == DETECTION_AUTO:
+            # 自动模式：先尝试 ping，失败则使用 ARP
+            is_online = await _ping_check(ip_address, ping_count)
+            if not is_online:
+                _LOGGER.debug("%s ping 失败，尝试 ARP 检测", ip_address)
+                is_online = await arping(ip_address, count=ping_count)
+        else:
+            # 默认使用 ARP
+            is_online = await arping(ip_address, count=ping_count)
+        
+        _LOGGER.debug("设备 %s 检测结果: %s (方式: %s)", 
+                     host, "在线" if is_online else "离线", detection_method)
         return is_online, current_time
+        
     except Exception as err:
         _LOGGER.error("检查设备状态时出错: %s", err)
         return False, datetime.now()
+
+async def _ping_check(ip_address: str, ping_count: int) -> bool:
+    """使用 ICMP ping 检测设备
+    
+    Args:
+        ip_address: IP 地址
+        ping_count: ping 包数量
+        
+    Returns:
+        bool: 是否在线
+    """
+    try:
+        host_ping = await async_ping(ip_address, count=ping_count, timeout=2, interval=0.5)
+        is_online = host_ping.packets_received > 0
+        _LOGGER.debug("ping %s: %s (收到 %d/%d 包)", 
+                     ip_address, "在线" if is_online else "离线",
+                     host_ping.packets_received, ping_count)
+        return is_online
+    except Exception as err:
+        _LOGGER.error("ping 检测失败: %s", err)
+        return False
 
 async def update_device_data(
     device_data: Dict[str, Any], 
@@ -360,13 +574,19 @@ async def update_device_data(
     retry_interval: float = DEFAULT_RETRY_INTERVAL,
     retry_ping_count: int = DEFAULT_RETRY_PING_COUNT,
     mode: str = MODE_PARALLEL,
-    reset_fail_count: bool = False  # 是否重置失败计数，用于API调用时立即判断状态
+    reset_fail_count: bool = False,  # 是否重置失败计数，用于API调用时立即判断状态
+    detection_method: str = DEFAULT_DETECTION_METHOD  # 检测方式
 ) -> Dict[str, Any]:
     """更新设备数据（带防抖机制）
     
     支持两种检测模式：
     1. parallel（并行ping，默认）：单次发送多个ping包，快速返回
     2. retry（快速重试）：检测到离线时立即连续重试确认，更可靠
+    
+    支持三种检测方式：
+    1. ping：仅使用 ICMP ping
+    2. arp：仅使用 ARP 检测（适合移动设备）
+    3. auto：先 ping，失败则 arp
     
     Args:
         device_data: 当前设备数据
@@ -379,12 +599,13 @@ async def update_device_data(
         retry_ping_count: 重试时发送的ping包数量
         mode: 检测模式，"parallel" 或 "retry"
         reset_fail_count: 是否重置失败计数，用于API调用时立即判断状态
+        detection_method: 检测方式，"ping"、"arp" 或 "auto"
         
     Returns:
         Dict[str, Any]: 更新后的设备数据
     """
     try:
-        is_online, current_time = await check_device_status(host, ping_count)
+        is_online, current_time = await check_device_status(host, ping_count, detection_method)
         current_date = current_time.date()
         was_online = device_data.get("is_online", False)
         
@@ -430,7 +651,7 @@ async def update_device_data(
                     retry_success = False
                     for retry in range(offline_threshold - current_fail_count):
                         await asyncio.sleep(retry_interval)
-                        retry_online, _ = await check_device_status(host, retry_ping_count)
+                        retry_online, _ = await check_device_status(host, retry_ping_count, detection_method)
                         
                         if retry_online:
                             if reset_fail_count:
@@ -568,10 +789,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_ENABLED,
         entry.data.get(CONF_ENABLED, DEFAULT_ENABLED)
     )
+    detection_method = entry.options.get(
+        CONF_DETECTION_METHOD,
+        entry.data.get(CONF_DETECTION_METHOD, DEFAULT_DETECTION_METHOD)
+    )
     
     _LOGGER.info(
-        "设备 %s 配置: enabled=%s, scan_interval=%ds, offline_threshold=%d, ping_count=%d, retry_interval=%ds, retry_ping_count=%d",
-        device_name, enabled, scan_interval, offline_threshold, ping_count, retry_interval, retry_ping_count
+        "设备 %s 配置: enabled=%s, scan_interval=%ds, offline_threshold=%d, ping_count=%d, retry_interval=%ds, retry_ping_count=%d, detection_method=%s",
+        device_name, enabled, scan_interval, offline_threshold, ping_count, retry_interval, retry_ping_count, detection_method
     )
     
     # 创建存储对象
@@ -628,6 +853,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "retry_interval": retry_interval,
         "retry_ping_count": retry_ping_count,
         "enabled": enabled,
+        "detection_method": detection_method,
     }
     
     unique_id = f"{entry.entry_id}_status"
@@ -646,7 +872,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ping_count=ping_count,
             retry_interval=retry_interval,
             retry_ping_count=retry_ping_count,
-            mode=MODE_RETRY  # 定时扫描默认使用快速重试模式，提高检测可靠性
+            mode=MODE_RETRY,  # 定时扫描默认使用快速重试模式，提高检测可靠性
+            detection_method=detection_method
         )
 
     coordinator = DataUpdateCoordinator(

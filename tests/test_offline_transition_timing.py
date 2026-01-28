@@ -14,6 +14,7 @@ from custom_components.DeviceOnlineTracker import (
     DEFAULT_PING_COUNT,
     DEFAULT_RETRY_INTERVAL,
     DEFAULT_RETRY_PING_COUNT,
+    DETECTION_PING,
 )
 
 
@@ -80,7 +81,8 @@ class TestOnlineToOfflineTransition:
                 "test_entry_id",
                 offline_threshold=3,
                 ping_count=3,
-                mode=MODE_PARALLEL
+                mode=MODE_PARALLEL,
+                detection_method=DETECTION_PING
             )
             
             elapsed = time.perf_counter() - start_time
@@ -116,7 +118,8 @@ class TestOnlineToOfflineTransition:
                     "test_entry_id",
                     offline_threshold=3,
                     ping_count=3,
-                    mode=MODE_PARALLEL
+                    mode=MODE_PARALLEL,
+                    detection_method=DETECTION_PING
                 )
                 cycle_time = time.perf_counter() - start_time
                 print(f"\n[Parallel Mode - Cycle {cycle + 1}]")
@@ -157,7 +160,8 @@ class TestOnlineToOfflineTransition:
                 ping_count=3,
                 retry_interval=0.1,  # Use short interval for testing
                 retry_ping_count=1,
-                mode=MODE_RETRY
+                mode=MODE_RETRY,
+                detection_method=DETECTION_PING
             )
             
             elapsed = time.perf_counter() - start_time
@@ -193,7 +197,8 @@ class TestOnlineToOfflineTransition:
                 ping_count=3,
                 retry_interval=0.1,
                 retry_ping_count=1,
-                mode=MODE_RETRY
+                mode=MODE_RETRY,
+                detection_method=DETECTION_PING
             )
             
             elapsed = time.perf_counter() - start_time
@@ -244,7 +249,8 @@ class TestOnlineToOfflineTransition:
                     "test_entry_id",
                     offline_threshold=3,
                     ping_count=3,
-                    mode=MODE_PARALLEL
+                    mode=MODE_PARALLEL,
+                    detection_method=DETECTION_PING
                 )
             
             elapsed_p = time.perf_counter() - start_p
@@ -273,7 +279,8 @@ class TestOnlineToOfflineTransition:
                 ping_count=3,
                 retry_interval=retry_interval,
                 retry_ping_count=1,
-                mode=MODE_RETRY
+                mode=MODE_RETRY,
+                detection_method=DETECTION_PING
             )
             
             elapsed_r = time.perf_counter() - start_r
@@ -345,7 +352,8 @@ class TestTimingWithRealDelays:
                 ping_count=3,
                 retry_interval=retry_interval,
                 retry_ping_count=1,
-                mode=MODE_RETRY
+                mode=MODE_RETRY,
+                detection_method=DETECTION_PING
             )
             
             elapsed = time.perf_counter() - start_time
@@ -428,7 +436,8 @@ class TestConcurrentPing:
                     f"entry_{i}",
                     offline_threshold=3,
                     ping_count=3,
-                    mode=MODE_PARALLEL
+                    mode=MODE_PARALLEL,
+                    detection_method=DETECTION_PING
                 )
             
             elapsed_seq = time.perf_counter() - start_seq
@@ -448,7 +457,8 @@ class TestConcurrentPing:
                     f"entry_{i}",
                     offline_threshold=3,
                     ping_count=3,
-                    mode=MODE_PARALLEL
+                    mode=MODE_PARALLEL,
+                    detection_method=DETECTION_PING
                 )
                 tasks.append(task)
             
@@ -514,7 +524,8 @@ class TestConcurrentPing:
                     entry_id,
                     offline_threshold=3,
                     ping_count=3,
-                    mode=MODE_PARALLEL
+                    mode=MODE_PARALLEL,
+                    detection_method=DETECTION_PING
                 )
         
         with patch("custom_components.DeviceOnlineTracker.async_ping", side_effect=mock_ping_tracking):
@@ -583,7 +594,8 @@ class TestConcurrentPing:
                     f"entry_{i}",
                     offline_threshold=1,  # Immediate offline detection
                     ping_count=3,
-                    mode=MODE_PARALLEL
+                    mode=MODE_PARALLEL,
+                    detection_method=DETECTION_PING
                 )
                 tasks.append(task)
             

@@ -12,11 +12,16 @@ from . import (
     CONF_PING_COUNT,
     CONF_RETRY_PING_COUNT,
     CONF_ENABLED,
+    CONF_DETECTION_METHOD,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_OFFLINE_THRESHOLD,
     DEFAULT_PING_COUNT,
     DEFAULT_RETRY_PING_COUNT,
     DEFAULT_ENABLED,
+    DEFAULT_DETECTION_METHOD,
+    DETECTION_PING,
+    DETECTION_ARP,
+    DETECTION_AUTO,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,6 +67,9 @@ class DeviceOnlineTrackerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_RETRY_PING_COUNT, default=DEFAULT_RETRY_PING_COUNT): vol.All(
                     vol.Coerce(int), vol.Range(min=1, max=10)
                 ),
+                vol.Optional(CONF_DETECTION_METHOD, default=DEFAULT_DETECTION_METHOD): vol.In(
+                    [DETECTION_PING, DETECTION_ARP, DETECTION_AUTO]
+                ),
             }),
             errors=errors,
         )
@@ -105,6 +113,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             CONF_ENABLED,
             self.config_entry.data.get(CONF_ENABLED, DEFAULT_ENABLED)
         )
+        current_detection_method = self.config_entry.options.get(
+            CONF_DETECTION_METHOD,
+            self.config_entry.data.get(CONF_DETECTION_METHOD, DEFAULT_DETECTION_METHOD)
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -121,6 +133,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 vol.Optional(CONF_RETRY_PING_COUNT, default=current_retry_ping_count): vol.All(
                     vol.Coerce(int), vol.Range(min=1, max=10)
+                ),
+                vol.Optional(CONF_DETECTION_METHOD, default=current_detection_method): vol.In(
+                    [DETECTION_PING, DETECTION_ARP, DETECTION_AUTO]
                 ),
             })
         ) 
