@@ -364,14 +364,14 @@ async def check_arp_table(ip_address: str, device_name: str = None) -> bool:
                             if ip_address in line:
                                 # 检查是否为 FAILED 状态
                                 if "FAILED" in line.upper():
-                                    _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在 FAILED 条目（视为离线）: %s", 
-                                                ip_address, device_name or ip_address, line)
+                                    # _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在 FAILED 条目（视为离线）: %s", 
+                                    #             ip_address, device_name or ip_address, line)
                                     continue
                                 
                                 # 检查是否为 STALE 状态
                                 if "STALE" in line.upper():
-                                    _LOGGER.info("ARP 表检测: %s (设备: %s) 存在 STALE 条目（已过期，视为离线）: %s", 
-                                                ip_address, device_name or ip_address, line)
+                                    # _LOGGER.info("ARP 表检测: %s (设备: %s) 存在 STALE 条目（已过期，视为离线）: %s", 
+                                    #             ip_address, device_name or ip_address, line)
                                     continue
                                 
                                 # 检查是否为其他有效状态
@@ -387,12 +387,17 @@ async def check_arp_table(ip_address: str, device_name: str = None) -> bool:
                                 
                                 # 如果没有找到有效状态，视为离线
                                 if not valid_state_found:
-                                    _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在未知状态条目，视为离线: %s", ip_address, device_name or ip_address, line)
+                                    # _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在未知状态条目，视为离线: %s", ip_address, device_name or ip_address, line)
                                     continue
                         
                         # 检查是否有有效条目
                         if has_valid_entry:
                             return True
+                        # 如果找到相关条目但都是无效状态，继续尝试下一个命令
+                        elif any(ip_address in line for line in output.split('\n')):
+                            # 找到相关条目但都是无效状态，继续尝试下一个命令
+                            _LOGGER.debug("ARP 表检测: %s (设备: %s) 找到相关条目但状态无效，继续尝试下一个命令", 
+                                        ip_address, device_name or ip_address)
                 except Exception as cmd_err:
                     _LOGGER.debug("ARP 命令执行失败: %s", cmd_err)
         elif system == "darwin":
@@ -442,6 +447,7 @@ async def check_arp_table(ip_address: str, device_name: str = None) -> bool:
                         #     Internet 地址         物理地址              类型
                         #     192.168.1.2           aa-bb-cc-dd-ee-ff     动态
                         lines = output.split('\n')
+                        has_valid_entry = False
                         for line in lines:
                             line = line.strip()
                             if ip_address in line:
@@ -450,7 +456,17 @@ async def check_arp_table(ip_address: str, device_name: str = None) -> bool:
                                     # 排除无效条目
                                     if 'invalid' not in line.lower():
                                         _LOGGER.debug("ARP 表检测: %s (设备: %s) 存在有效条目: %s", ip_address, device_name or ip_address, line)
-                                        return True
+                                        has_valid_entry = True
+                                        break
+                        
+                        # 检查是否有有效条目
+                        if has_valid_entry:
+                            return True
+                        # 如果找到相关条目但都是无效状态，继续尝试下一个命令
+                        elif any(ip_address in line for line in output.split('\n')):
+                            # 找到相关条目但都是无效状态，继续尝试下一个命令
+                            _LOGGER.debug("ARP 表检测: %s (设备: %s) 找到相关条目但状态无效，继续尝试下一个命令", 
+                                        ip_address, device_name or ip_address)
                 except Exception as cmd_err:
                     _LOGGER.debug("ARP 命令执行失败: %s", cmd_err)
         
