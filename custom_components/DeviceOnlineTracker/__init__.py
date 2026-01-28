@@ -821,12 +821,16 @@ async def update_device_data(
         Dict[str, Any]: 更新后的设备数据
     """
     try:
+        # 每轮扫描开始时打印IP、MAC和名称的对应关系
+        device_name = device_data['name']
+        _LOGGER.debug("开始检测设备 %s (IP: %s)", device_name, host)
+        
         is_online, current_time = await check_device_status(host, ping_count, detection_method)
         current_date = current_time.date()
         was_online = device_data.get("is_online", False)
         
-        # name-host 显示名称
-        display_name = f"{device_data['name']}-{host}"  
+        # 使用设备名称作为显示名称
+        display_name = device_name
         # 初始化失败计数器
         if "fail_count" not in device_data:
             device_data["fail_count"] = 0
@@ -912,41 +916,45 @@ async def update_device_data(
                             # API调用时，使用临时计数判断
                             if temp_fail_count >= offline_threshold:
                                 final_online_status = False
-                                _LOGGER.info("设备 %s API调用连续 %d 次检测失败，确认离线", 
-                                            display_name, temp_fail_count)
+                                # 只在状态变化时输出日志
+                                if was_online:
+                                    _LOGGER.info("设备 %s API调用确认离线", display_name)
                             else:
                                 # API调用时，如果重试失败次数未达阈值，立即返回离线
                                 final_online_status = False
-                                _LOGGER.debug("设备 %s API调用重试失败次数未达阈值，但立即返回离线状态", 
-                                             display_name)
+                                # 减少日志输出
+                                # _LOGGER.debug("设备 %s API调用重试失败次数未达阈值，但立即返回离线状态", display_name)
                         else:
                             # 定时任务时，使用原始计数判断
                             if device_data["fail_count"] >= offline_threshold:
                                 final_online_status = False
-                                _LOGGER.info("设备 %s 连续 %d 次检测失败，确认离线", 
-                                            display_name, device_data["fail_count"])
+                                # 只在状态变化时输出日志
+                                if was_online:
+                                    _LOGGER.info("设备 %s 确认离线", display_name)
                             else:
                                 # 还没达到阈值，保持之前的在线状态
                                 final_online_status = was_online
-                                _LOGGER.debug("设备 %s 失败次数未达阈值，保持状态: %s", 
-                                             display_name, "在线" if final_online_status else "离线")
+                                # 减少日志输出
+                                # _LOGGER.debug("设备 %s 失败次数未达阈值，保持状态: %s", display_name, "在线" if final_online_status else "离线")
             else:
                 # 非快速重试模式，直接判断状态
                 if reset_fail_count:
                     # API调用时，只要检测失败，立即返回离线
                     final_online_status = False
-                    _LOGGER.debug("设备 %s API调用检测离线，立即返回离线状态", display_name)
+                    # 减少日志输出
+                    # _LOGGER.debug("设备 %s API调用检测离线，立即返回离线状态", display_name)
                 else:
                     # 定时任务时，使用原始计数判断
                     if device_data["fail_count"] >= offline_threshold:
                         final_online_status = False
-                        _LOGGER.info("设备 %s 连续 %d 次检测失败，确认离线", 
-                                    display_name, device_data["fail_count"])
+                        # 只在状态变化时输出日志
+                        if was_online:
+                            _LOGGER.info("设备 %s 确认离线", display_name)
                     else:
                         # 还没达到阈值，保持之前的在线状态
                         final_online_status = was_online
-                        _LOGGER.debug("设备 %s 失败次数未达阈值，保持状态: %s", 
-                                     display_name, "在线" if final_online_status else "离线")
+                        # 减少日志输出
+                        # _LOGGER.debug("设备 %s 失败次数未达阈值，保持状态: %s", display_name, "在线" if final_online_status else "离线")
         
         # 如果是新的一天，重置计时
         if current_date != device_data["last_date"]:
@@ -957,6 +965,13 @@ async def update_device_data(
         if device_data.get("last_check") and device_data.get("is_online") and final_online_status:
             time_diff = (current_time - device_data["last_check"]).total_seconds() / 60
             device_data["online_time"] += time_diff
+        
+        # 只在状态变化时输出日志
+        if was_online != final_online_status:
+            if final_online_status:
+                _LOGGER.info("设备 %s 恢复在线", display_name)
+            else:
+                _LOGGER.info("设备 %s 变为离线", display_name)
         
         device_data["is_online"] = final_online_status
         device_data["last_check"] = current_time
