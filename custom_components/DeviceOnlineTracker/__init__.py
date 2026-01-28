@@ -319,22 +319,47 @@ async def check_arp_table(ip_address: str) -> bool:
     try:
         if system == "linux":
             # Linux: 使用 ip neigh 或读取 /proc/net/arp
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ["ip", "neigh", "show", ip_address],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-            )
-            output = result.stdout.strip()
-            # 检查是否有有效的 ARP 条目（REACHABLE, STALE, DELAY, PROBE 都表示设备存在）
-            if output and ip_address in output:
-                # 排除 FAILED 状态
-                if "FAILED" not in output.upper():
-                    _LOGGER.debug("ARP 表检测: %s 存在有效条目: %s", ip_address, output)
-                    return True
+            # 尝试多种 ARP 表查看命令
+            arp_commands = [
+                ["ip", "neigh", "show", ip_address],  # 查看指定 IP
+                ["ip", "neigh", "show"]  # 查看所有 ARP 条目
+            ]
+            
+            for cmd in arp_commands:
+                try:
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                    )
+                    
+                    output = result.stdout.strip()
+                    _LOGGER.debug("Linux ARP 命令 %s 输出: %s", cmd, output)
+                    
+                    if output:
+                        # 检查是否有有效的 ARP 条目
+                        lines = output.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if ip_address in line:
+                                # 检查是否为有效状态（排除 FAILED）
+                                if "FAILED" not in line.upper():
+                                    # 有效的 ARP 状态：REACHABLE, STALE, DELAY, PROBE
+                                    valid_states = ["REACHABLE", "STALE", "DELAY", "PROBE"]
+                                    for state in valid_states:
+                                        if state in line.upper():
+                                            _LOGGER.info("ARP 表检测: %s 存在有效条目 (状态: %s): %s", 
+                                                        ip_address, state, line)
+                                            return True
+                                    # 即使没有明确状态，只要不是 FAILED 就认为有效
+                                    _LOGGER.info("ARP 表检测: %s 存在有效条目: %s", ip_address, line)
+                                    return True
+                except Exception as cmd_err:
+                    _LOGGER.debug("ARP 命令执行失败: %s", cmd_err)
         elif system == "darwin":
             # macOS: 使用 arp -n
             result = await asyncio.get_event_loop().run_in_executor(
@@ -354,18 +379,45 @@ async def check_arp_table(ip_address: str) -> bool:
                     return True
         else:
             # Windows 或其他系统: 使用 arp -a
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ["arp", "-a", ip_address],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-            )
-            if ip_address in result.stdout:
-                _LOGGER.debug("ARP 表检测: %s 存在条目", ip_address)
-                return True
+            # 尝试多种 ARP 表查看命令
+            arp_commands = [
+                ["arp", "-a", ip_address],  # 查看指定 IP
+                ["arp", "-a"]  # 查看所有 ARP 条目
+            ]
+            
+            for cmd in arp_commands:
+                try:
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                    )
+                    
+                    output = result.stdout.strip()
+                    _LOGGER.debug("Windows ARP 命令 %s 输出: %s", cmd, output[:200])  # 限制输出长度
+                    
+                    # 检查是否有有效的 ARP 条目
+                    if output:
+                        # 在 Windows 上，ARP 表格式类似：
+                        #   接口: 192.168.1.1
+                        #     Internet 地址         物理地址              类型
+                        #     192.168.1.2           aa-bb-cc-dd-ee-ff     动态
+                        lines = output.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if ip_address in line:
+                                # 检查是否有 MAC 地址（包含连字符或冒号）
+                                if '-' in line or ':' in line:
+                                    # 排除无效条目
+                                    if 'invalid' not in line.lower():
+                                        _LOGGER.debug("ARP 表检测: %s 存在有效条目: %s", ip_address, line)
+                                        return True
+                except Exception as cmd_err:
+                    _LOGGER.debug("ARP 命令执行失败: %s", cmd_err)
         
         _LOGGER.debug("ARP 表检测: %s 无有效条目", ip_address)
         return False
@@ -396,29 +448,102 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
         
         if arping_path:
             # 使用 arping 命令
+            # 自动检测可用的网络接口
+            def get_available_interfaces():
+                """获取可用的网络接口列表"""
+                try:
+                    import netifaces
+                    interfaces = netifaces.interfaces()
+                    # 过滤掉回环接口
+                    return [iface for iface in interfaces if iface != 'lo']
+                except:
+                    # 备选方案：使用 ip link show
+                    try:
+                        result = subprocess.run(
+                            ["ip", "link", "show"],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        interfaces = []
+                        for line in result.stdout.split('\n'):
+                            if ': <' in line and 'lo:' not in line:
+                                iface = line.split(':')[1].strip()
+                                if iface and not iface.startswith('@'):
+                                    interfaces.append(iface)
+                        return interfaces
+                    except:
+                        return []
+            
+            available_interfaces = get_available_interfaces()
+            _LOGGER.debug("可用的网络接口: %s", available_interfaces)
+            
+            # 构建 arping 命令列表，尝试不同的接口
+            arping_commands = []
+            
             if system == "linux":
                 # Linux arping (iputils 版本)
-                cmd = ["arping", "-c", str(count), "-w", str(int(timeout)), ip_address]
+                # 基本命令（自动选择接口）
+                base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout)), ip_address]
+                arping_commands.append(base_cmd)
+                
+                # 尝试指定可用接口
+                for iface in available_interfaces[:3]:  # 最多尝试3个接口
+                    iface_cmd = ["arping", "-I", iface, "-c", str(count), "-w", str(int(timeout)), ip_address]
+                    arping_commands.append(iface_cmd)
             elif system == "darwin":
                 # macOS arping (需要安装)
-                cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+                base_cmd = ["arping", "-c", str(count), "-w", str(int(timeout * 1000)), ip_address]
+                arping_commands.append(base_cmd)
             else:
-                cmd = ["arping", "-c", str(count), ip_address]
+                # 其他系统
+                base_cmd = ["arping", "-c", str(count), ip_address]
+                arping_commands.append(base_cmd)
             
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout + 2
-                )
-            )
+            # 尝试所有可能的 arping 命令
+            is_online = False
+            last_result = None
+            for cmd_idx, cmd in enumerate(arping_commands):
+                try:
+                    _LOGGER.debug("尝试 arping 命令 %d/%d: %s", cmd_idx + 1, len(arping_commands), cmd)
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout + 2
+                        )
+                    )
+                    last_result = result
+                    
+                    # 检查是否收到响应
+                    cmd_online = result.returncode == 0 or "reply" in result.stdout.lower()
+                    _LOGGER.debug("arping 命令 %s 结果: %s (returncode=%d, output=%s)", 
+                                 cmd, "在线" if cmd_online else "离线", result.returncode, result.stdout.strip())
+                    
+                    if cmd_online:
+                        is_online = True
+                        _LOGGER.info("arping 命令成功: %s", cmd)
+                        break
+                except Exception as cmd_err:
+                    _LOGGER.debug("arping 命令执行失败: %s - %s", cmd, cmd_err)
             
-            # 检查是否收到响应
-            is_online = result.returncode == 0 or "reply" in result.stdout.lower()
-            _LOGGER.debug("arping %s 结果: %s (returncode=%d)", 
-                         ip_address, "在线" if is_online else "离线", result.returncode)
+            # 记录最终结果
+            if last_result:
+                _LOGGER.debug("arping %s 最终结果: %s", 
+                             ip_address, "在线" if is_online else "离线")
+            else:
+                _LOGGER.debug("所有 arping 命令都执行失败")
+            
+            # 如果 arping 都失败，尝试直接检查 ARP 表
+            if not is_online:
+                _LOGGER.debug("所有 arping 命令失败，尝试直接检查 ARP 表")
+                arp_table_result = await check_arp_table(ip_address)
+                if arp_table_result:
+                    _LOGGER.info("ARP 表检查成功，确认设备 %s 在线", ip_address)
+                    is_online = True
+            
             return is_online
         else:
             # arping 不可用，使用主动触发 ARP 的方式
@@ -523,17 +648,74 @@ async def check_device_status(
             
         elif detection_method == DETECTION_ARP:
             # 仅使用 ARP 检测（适合移动设备）
-            is_online = await arping(ip_address, count=ping_count)
+            _LOGGER.info("开始 ARP 模式检测设备 %s", ip_address)
+            
+            # 1. 首先清理并刷新 ARP 表
+            _LOGGER.debug("尝试刷新 ARP 表以获取最新状态")
+            await asyncio.sleep(0.2)
+            
+            # 2. 发送多次 ARP 请求以提高成功率
+            arp_success = False
+            for attempt in range(3):
+                _LOGGER.debug("ARP 检测尝试 %d/3 for %s", attempt + 1, ip_address)
+                arp_result = await arping(ip_address, count=ping_count)
+                if arp_result:
+                    _LOGGER.info("ARP 检测尝试 %d/3 成功: %s", attempt + 1, ip_address)
+                    arp_success = True
+                    break
+                await asyncio.sleep(0.5)
+            
+            is_online = arp_success
+            
+            # 3. ARP 失败时，详细检查 ARP 表
+            if not is_online:
+                _LOGGER.warning("%s ARP 检测失败，开始详细排查", ip_address)
+                
+                # 直接检查 ARP 表
+                import platform
+                system = platform.system().lower()
+                
+                if system == "windows":
+                    # Windows: 检查 ARP 表
+                    try:
+                        result = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: subprocess.run(
+                                ["arp", "-a"],
+                                capture_output=True,
+                                text=True,
+                                timeout=5
+                            )
+                        )
+                        _LOGGER.debug("Windows 完整 ARP 表: %s", result.stdout[:500])
+                    except Exception as e:
+                        _LOGGER.debug("检查 Windows ARP 表失败: %s", e)
+                
+                # 4. 尝试 ping 作为备选
+                _LOGGER.debug("%s ARP 检测失败，尝试 ping 作为备选", ip_address)
+                ping_result = await _ping_check(ip_address, ping_count)
+                if ping_result:
+                    _LOGGER.info("%s ping 检测成功，确认在线", ip_address)
+                    is_online = True
+                else:
+                    _LOGGER.debug("%s ping 检测也失败", ip_address)
             
         elif detection_method == DETECTION_AUTO:
-            # 自动模式：先尝试 ping，失败则使用 ARP
-            is_online = await _ping_check(ip_address, ping_count)
-            if not is_online:
-                _LOGGER.debug("%s ping 失败，尝试 ARP 检测", ip_address)
-                is_online = await arping(ip_address, count=ping_count)
-        else:
-            # 默认使用 ARP
+            # 自动模式：先尝试 ARP，失败则使用 ping
+            # ARP 更适合移动设备，因为即使锁屏也能响应
             is_online = await arping(ip_address, count=ping_count)
+            if not is_online:
+                _LOGGER.debug("%s ARP 检测失败，尝试 ping 检测", ip_address)
+                is_online = await _ping_check(ip_address, ping_count)
+        else:
+            # 默认使用 ARP + ping 组合检测
+            is_online = await arping(ip_address, count=ping_count)
+            if not is_online:
+                _LOGGER.debug("%s ARP 检测失败，尝试 ping 作为备选", ip_address)
+                ping_result = await _ping_check(ip_address, ping_count)
+                if ping_result:
+                    _LOGGER.debug("%s ping 检测成功，确认在线", ip_address)
+                    is_online = True
         
         _LOGGER.debug("设备 %s 检测结果: %s (方式: %s)", 
                      host, "在线" if is_online else "离线", detection_method)
