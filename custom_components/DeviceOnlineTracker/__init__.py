@@ -343,6 +343,7 @@ async def check_arp_table(ip_address: str) -> bool:
                     if output:
                         # 检查是否有有效的 ARP 条目
                         lines = output.split('\n')
+                        has_valid_entry = False
                         for line in lines:
                             line = line.strip()
                             if ip_address in line:
@@ -360,10 +361,11 @@ async def check_arp_table(ip_address: str) -> bool:
                                         if state in line.upper():
                                             _LOGGER.info("ARP 表检测: %s 存在有效条目 (状态: %s): %s", 
                                                         ip_address, state, line)
-                                            return True
-                                    
-                                    # 其他状态，视为离线
-                                    _LOGGER.debug("ARP 表检测: %s 存在未知状态条目，视为离线: %s", ip_address, line)
+                                            has_valid_entry = True
+                                            break
+                        
+                        if has_valid_entry:
+                            return True
                 except Exception as cmd_err:
                     _LOGGER.debug("ARP 命令执行失败: %s", cmd_err)
         elif system == "darwin":
