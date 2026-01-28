@@ -348,21 +348,22 @@ async def check_arp_table(ip_address: str) -> bool:
                             if ip_address in line:
                                 # 检查是否为有效状态（排除 FAILED）
                                 if "FAILED" not in line.upper():
-                                    # 有效的 ARP 状态：REACHABLE, DELAY, PROBE（不包括 STALE，因为 STALE 表示条目已过期）
+                                    # 检查是否为 STALE 状态
+                                    if "STALE" in line.upper():
+                                        _LOGGER.info("ARP 表检测: %s 存在 STALE 条目（已过期，视为离线）: %s", 
+                                                    ip_address, line)
+                                        continue  # 跳过 STALE 状态，视为离线
+                                    
+                                    # 有效的 ARP 状态：REACHABLE, DELAY, PROBE
                                     valid_states = ["REACHABLE", "DELAY", "PROBE"]
                                     for state in valid_states:
                                         if state in line.upper():
-                                            _LOGGER.debug("ARP 表检测: %s 存在有效条目 (状态: %s): %s", 
+                                            _LOGGER.info("ARP 表检测: %s 存在有效条目 (状态: %s): %s", 
                                                         ip_address, state, line)
                                             return True
-                                    # 检查是否为 STALE 状态
-                                    if "STALE" in line.upper():
-                                        _LOGGER.debug("ARP 表检测: %s 存在 STALE 条目（已过期，视为离线）: %s", 
-                                                    ip_address, line)
-                                    else:
-                                        # 其他状态，视为有效
-                                        _LOGGER.debug("ARP 表检测: %s 存在有效条目: %s", ip_address, line)
-                                        return True
+                                    
+                                    # 其他状态，视为离线
+                                    _LOGGER.debug("ARP 表检测: %s 存在未知状态条目，视为离线: %s", ip_address, line)
                 except Exception as cmd_err:
                     _LOGGER.debug("ARP 命令执行失败: %s", cmd_err)
         elif system == "darwin":
