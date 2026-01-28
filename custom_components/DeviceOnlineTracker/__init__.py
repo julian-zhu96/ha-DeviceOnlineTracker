@@ -738,16 +738,19 @@ async def check_device_status(
             
             # 2. 发送多次 ARP 请求以提高成功率
             arp_success = False
-            for attempt in range(3):
+            max_attempts = 2  # 减少重试次数，避免检测时间过长
+            retry_interval = 1.0  # 增加重试间隔，给设备更多响应时间
+            for attempt in range(max_attempts):
                 # 减少日志输出
-                # _LOGGER.debug("ARP 检测尝试 %d/3 for %s", attempt + 1, ip_address)
+                # _LOGGER.debug("ARP 检测尝试 %d/%d for %s", attempt + 1, max_attempts, ip_address)
                 arp_result = await arping(ip_address, count=ping_count, device_name=device_name)
                 if arp_result:
                     # 减少日志输出
-                    # _LOGGER.info("ARP 检测尝试 %d/3 成功: %s", attempt + 1, ip_address)
+                    # _LOGGER.info("ARP 检测尝试 %d/%d 成功: %s", attempt + 1, max_attempts, ip_address)
                     arp_success = True
                     break
-                await asyncio.sleep(0.5)
+                if attempt < max_attempts - 1:  # 最后一次尝试后不需要等待
+                    await asyncio.sleep(retry_interval)
             
             is_online = arp_success
             
