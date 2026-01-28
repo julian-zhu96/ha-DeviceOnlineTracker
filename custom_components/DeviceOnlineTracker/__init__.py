@@ -348,16 +348,21 @@ async def check_arp_table(ip_address: str) -> bool:
                             if ip_address in line:
                                 # 检查是否为有效状态（排除 FAILED）
                                 if "FAILED" not in line.upper():
-                                    # 有效的 ARP 状态：REACHABLE, STALE, DELAY, PROBE
-                                    valid_states = ["REACHABLE", "STALE", "DELAY", "PROBE"]
+                                    # 有效的 ARP 状态：REACHABLE, DELAY, PROBE（不包括 STALE，因为 STALE 表示条目已过期）
+                                    valid_states = ["REACHABLE", "DELAY", "PROBE"]
                                     for state in valid_states:
                                         if state in line.upper():
-                                            _LOGGER.info("ARP 表检测: %s 存在有效条目 (状态: %s): %s", 
+                                            _LOGGER.debug("ARP 表检测: %s 存在有效条目 (状态: %s): %s", 
                                                         ip_address, state, line)
                                             return True
-                                    # 即使没有明确状态，只要不是 FAILED 就认为有效
-                                    _LOGGER.info("ARP 表检测: %s 存在有效条目: %s", ip_address, line)
-                                    return True
+                                    # 检查是否为 STALE 状态
+                                    if "STALE" in line.upper():
+                                        _LOGGER.debug("ARP 表检测: %s 存在 STALE 条目（已过期，视为离线）: %s", 
+                                                    ip_address, line)
+                                    else:
+                                        # 其他状态，视为有效
+                                        _LOGGER.debug("ARP 表检测: %s 存在有效条目: %s", ip_address, line)
+                                        return True
                 except Exception as cmd_err:
                     _LOGGER.debug("ARP 命令执行失败: %s", cmd_err)
         elif system == "darwin":
@@ -540,6 +545,10 @@ async def arping(ip_address: str, count: int = 3, timeout: float = 2.0) -> bool:
                     
                     if cmd_online:
                         is_online = True
+                        
+                        # 第一次成功的命令打印日志
+                        if cmd_idx == 0:
+                            _LOGGER.debug("arping 命令第一次尝试成功: %s", cmd)
                         
                         # 记录工作的接口
                         if "-I" in cmd:
